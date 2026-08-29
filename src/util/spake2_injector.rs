@@ -598,6 +598,6 @@ impl Spake2Injector {
 
 const TLS_CONTENT_TYPE_APPLICATION_DATA: u8 = 0x17;
 
-fn is_application_data(data: &[u8]) -> bool {
+pub fn is_application_data(data: &[u8]) -> bool {
     data.first() == Some(&TLS_CONTENT_TYPE_APPLICATION_DATA)
 }

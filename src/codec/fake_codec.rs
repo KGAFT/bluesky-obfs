@@ -26,7 +26,7 @@ use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
 use wreq::{Client, Emulation, Proxy};
-use crate::util::spake2_injector::{Spake2Injector, Spake2State};
+use crate::util::spake2_injector::{is_application_data, Spake2Injector, Spake2State};
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -239,7 +239,7 @@ impl FakeCodec {
                     eprintln!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
                     break;
                 };
-                if base_tls_header.is_none() {
+                if base_tls_header.is_none() && is_application_data(&packet) {
                     base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
                 }
                 match injector.on_local_packet(packet).await {
@@ -335,7 +335,7 @@ impl FakeCodec {
                     //eprintln!("[FakeCodec DEBUG] handshake_from_server: remote channel closed or not yet connected");
                     continue;
                 };
-                if base_tls_header.is_none() {
+                if base_tls_header.is_none() && is_application_data(&packet) {
                     base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
                 }
                 match injector.on_local_packet(packet).await {
