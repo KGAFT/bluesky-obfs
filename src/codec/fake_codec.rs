@@ -26,6 +26,7 @@ use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
 use wreq::{Client, Emulation, Proxy};
+use crate::util::spake2_injector::{Spake2Injector, Spake2State};
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -194,17 +195,10 @@ impl FakeCodec {
         stream: &mut T,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         eprintln!("[FakeCodec DEBUG] handshake_from_client: Starting handshake");
-        let target_packet = self.select_packet_from_pattern(1, 1);
-        eprintln!(
-            "[FakeCodec DEBUG] handshake_from_client: Selected target packet index: {}",
-            target_packet
-        );
+        let mut injector = Spake2Injector::new(self.cfg.clone());
         let mut local_proxy = ProxyInterface::new(self.cfg.setup_proxy_port).await;
         let mut temp_transport = Framed::new(TempTransport::new(stream), TlsCodec::new());
         let client = self.init_wreq_instance();
-        let mut packet_counter: usize = 0;
-        let mut spake: Option<Spake2<Ed25519Group>> = None;
-        let mut shared: Option<Vec<u8>> = None;
         let mut base_tls_header: Option<Vec<u8>> = None;
 
         let req_fut = client
@@ -217,103 +211,82 @@ impl FakeCodec {
 
         loop {
             tokio::select! {
-                 resp = &mut req_fut, if !req_done => {
-                    req_done = true;
-                    if let Err(err) = resp { eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err); return None; }
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
-
-                    let header = match base_tls_header.clone() {
-                        Some(h) => h,
-                        None => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
-                            vec![0; TLS_HEADER_LEN]
-                        }
-                    };
-
-                    if let Some(msg) = self.make_client_begin_msg(header).await {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
-                        if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
-                            break;
-                        }
-                    } else {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to make client begin msg");
-                    }
-                    break;
+            resp = &mut req_fut, if !req_done => {
+                req_done = true;
+                if let Err(err) = resp {
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
+                    return None;
                 }
-                packet_to_send = local_proxy.1.from_endpoint_rcv.recv() => {
-                    if let Some(mut packet) = packet_to_send {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Received packet from local_proxy, counter: {}, target: {}, packet_len: {}",
-                        packet_counter, target_packet, packet.len());
-                    packet_counter += 1;
-                    if packet_counter == target_packet {
-                        if base_tls_header.is_none() {
-                            base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
-                        }
+                eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
 
-                        let res = Self::inject_client_message(&self.cfg, packet.to_vec()).await;
-                        if let Some(res) = res {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully injected client message at packet {}", packet_counter);
-                            packet = Bytes::from(res.0);
-                            spake = Some(res.1);
-                        } else{
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to inject client message at packet {}", packet_counter);
+                let header = base_tls_header.clone().unwrap_or_else(|| {
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
+                    vec![0; TLS_HEADER_LEN]
+                });
+
+                if let Some(msg) = injector.make_client_begin_msg(header).await {
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
+                    if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
+                    }
+                } else {
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to make client begin msg");
+                }
+                break;
+            }
+            packet_to_send = local_proxy.1.from_endpoint_rcv.recv() => {
+                let Some(packet) = packet_to_send else {
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
+                    break;
+                };
+                if base_tls_header.is_none() {
+                    base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
+                }
+                match injector.on_local_packet(packet).await {
+                    Some(out) => {
+                        if send_message(&mut temp_transport, out).await.is_err() {
+                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
                             break;
                         }
                     }
-
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending packet {} to temp_transport (server), len: {}", packet_counter, packet.len());
-                    if send_message(&mut temp_transport, packet).await.is_err() {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet {} to temp_transport", packet_counter);
+                    None => {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_client: injection failed, aborting");
                         break;
                     }
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully sent packet {} to temp_transport", packet_counter);
-
                 }
-                }
-                recv_packet = receive_message(&mut temp_transport) => {
-                    match recv_packet {
-                    Ok(data) => {
-                         if let Some(mut data) = data {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Received packet from temp_transport, len: {}", data.len());
-                            let mut packet_found = false;
-                            if spake.is_some() {
-                                if let Some(hello) = Self::probe_for_server_hello_struct(&self.cfg, &data.as_mut()[TLS_HEADER_LEN..]).await {
-                                   eprintln!("[FakeCodec DEBUG] handshake_from_client: Probed server hello struct successfully");
-                                   let spake_session = spake.take().unwrap();
-                                   if let Ok(data) = spake_session.finish(hello.auth_data.as_slice()) {
-                                       eprintln!("[FakeCodec DEBUG] handshake_from_client: SPAKE2 finish successful, shared secret derived");
-                                       shared = Some(data);
-                                   } else {
-                                       eprintln!("[FakeCodec DEBUG] handshake_from_client: SPAKE2 finish failed");
-                                       break;
-                                   }
-                                   let _ = local_proxy.1.to_endpoint_snd.send(Bytes::from(hello.original_packet)).await;
-                                   packet_found = true;
-                                } else {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to probe server hello struct");
-                                }
+            }
+            recv_packet = receive_message(&mut temp_transport) => {
+                match recv_packet {
+                    Ok(Some(data)) => {
+                        match injector.on_remote_packet(data.freeze()).await {
+                            Some(out) => {
+                                let _ = local_proxy.1.to_endpoint_snd.send(out).await;
                             }
-                            if !packet_found {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Forwarding packet to local_proxy (not packet_found)");
-                                    let _ = local_proxy.1.to_endpoint_snd.send(data.freeze()).await;
-                            }
-                         }
-                    }
-                    Err(terminates) => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
-                            if terminates {
+                            None => {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_client: finish failed, aborting");
                                 break;
                             }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(terminates) => {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
+                        if terminates {
+                            break;
                         }
                     }
                 }
             }
         }
+        }
+
+        let shared = match injector.state() {
+            Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
+            _ => None,
+        };
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_client: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(),
-            base_tls_header.is_some()
+            shared.is_some(), base_tls_header.is_some()
         );
         Some((shared?, base_tls_header?))
     }
@@ -323,120 +296,71 @@ impl FakeCodec {
         stream: &mut T,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         eprintln!("[FakeCodec DEBUG] handshake_from_server: Starting handshake");
+        let mut injector = Spake2Injector::new(self.cfg.clone());
         let mut proxy_endpoint: Option<(ProxyEndpoint, SenderSideChannel)> = None;
-        eprintln!("[FakeCodec DEBUG] handshake_from_server: Connected to remote!");
-
         let mut temp_transport = Framed::new(TempTransport::new(stream), TlsCodec::new());
-        let mut packet_counter: usize = 0;
-        let mut shared: Option<Vec<u8>> = None;
-        let mut client_hello: Option<ClientHelloStruct> = None;
-        let mut target_packet: Option<usize> = None;
         let mut base_tls_header: Option<Vec<u8>> = None;
-        eprintln!("[FakeCodec DEBUG] handshake_from_server: Starting receiving messages");
 
         loop {
             tokio::select! {
-                recv_packet = receive_message(&mut temp_transport) => {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_server: Received something from remote ");
-                    match recv_packet{
-                        Ok(data) => {
-
-                            if let Some(mut data) = data {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_server: Received packet {} from temp_transport (client), len: {}", packet_counter, data.len());
-
-                                if shared.is_none() {
-                                    let mut found = false;
-                                    if client_hello.is_none() && let Some(mut hello) = Self::probe_for_client_hello_struct(&self.cfg, &data.as_mut()[TLS_HEADER_LEN..]).await{
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Successfully probed ClientHelloStruct at packet {}", packet_counter);
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: original packet: {:?}", hello.original_packet);
-
-                                        let orig_data = Bytes::from(hello.original_packet);
-                                        hello.original_packet = vec![];
-
-                                        let res =  self.try_send_to_remote(&mut proxy_endpoint, orig_data).await;
-                                        if res.is_none(){
-                                            eprintln!("[FakeCodec DEBUG] failed to send packet to remote!");
-                                            break
-                                        }
-                                        found = true;
-                                        client_hello = Some(hello);
-                                        target_packet = Some(1);
-                                        packet_counter = 0;
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Selected target_packet {} for server injection", target_packet.unwrap());
-                                    } else {
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Packet {} is not a ClientHelloStruct, forwarding to proxy_endpoint", packet_counter);
-                                    }
-
-                                    if !found {
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Forwarding packet {} to proxy_endpoint (Google)", packet_counter);
-                                        let res = self.try_send_to_remote(&mut proxy_endpoint, data.freeze()).await;
-                                        if res.is_none(){
-                                            eprintln!("[FakeCodec DEBUG] failed to send packet to remote!");
-                                            break
-                                        }
-                                    }
-                                } else {
-                                    if Self::probe_for_client_begin(&self.cfg,  &data.as_mut()[TLS_HEADER_LEN..]).await{
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Received ClientBeginStruct, handshake complete");
-                                        break;
-                                    }
+            recv_packet = receive_message(&mut temp_transport) => {
+                match recv_packet {
+                    Ok(Some(data)) => {
+                        match injector.on_remote_packet(data.freeze()).await {
+                            Some(out) => {
+                                if self.try_send_to_remote(&mut proxy_endpoint, out).await.is_none() {
+                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: failed to forward to remote");
+                                    break;
                                 }
-                            } else {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_server: Received None from temp_transport");
                             }
-                        }
-                        Err(terminates) => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
-                            if terminates {
+                            // Only reachable on the client's ClientBegin (success) since that's
+                            // the sole None case for the server's on_remote_packet.
+                            None => {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
                                 break;
                             }
                         }
                     }
-                }
-                packet_to_send = self.get_from_remote(&mut proxy_endpoint) => {
-                    if let Some(mut packet) = packet_to_send {
-                        packet_counter += 1;
-                        eprintln!("[FakeCodec DEBUG] handshake_from_server: Received packet from proxy_endpoint, counter: {}", packet_counter);
-                        if let Some(target) = target_packet.as_ref() {
-                            if base_tls_header.is_none() {
-                                base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
-                            }
-                            if packet_counter == *target && let Some(hello) = client_hello.as_ref() {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_server: Injecting server message for target packet {}", target);
-                                let res = Self::inject_server_message(&self.cfg, hello, packet.to_vec()).await;
-                                if let Some(res) = res {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: Successfully injected server message");
-                                    packet = Bytes::from(res.0);
-                                    if let Ok(data) = res.1.finish(hello.auth_data.as_slice()) {
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: SPAKE2 finish successful");
-                                        shared = Some(data);
-                                    } else {
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: SPAKE2 finish failed");
-                                        break;
-                                    }
-                                } else {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to inject server message");
-                                    break;
-                                }
-                            }
+                    Ok(None) => {}
+                    Err(terminates) => {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
+                        if terminates {
+                            break;
                         }
-
-                        if send_message(&mut temp_transport, packet).await.is_err() {
+                    }
+                }
+            }
+            packet_to_send = self.get_from_remote(&mut proxy_endpoint) => {
+                let Some(packet) = packet_to_send else {
+                    //eprintln!("[FakeCodec DEBUG] handshake_from_server: remote channel closed or not yet connected");
+                    continue;
+                };
+                if base_tls_header.is_none() {
+                    base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
+                }
+                match injector.on_local_packet(packet).await {
+                    Some(out) => {
+                        if send_message(&mut temp_transport, out).await.is_err() {
                             eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
                             break;
                         }
-                    } else {
-                     //   eprintln!("[FakeCodec DEBUG] handshake_from_server: proxy_endpoint channel closed");
-                    //    break
+                    }
+                    None => {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_server: injection failed, aborting");
+                        break;
                     }
                 }
-
             }
         }
+        }
+
+        let shared = match injector.state() {
+            Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
+            _ => None,
+        };
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(),
-            base_tls_header.is_some()
+            shared.is_some(), base_tls_header.is_some()
         );
         Some((shared?, base_tls_header?))
     }
@@ -488,413 +412,6 @@ impl FakeCodec {
         }
     }
 
-    fn select_packet_from_pattern(&self, start_index: usize, end_offset: usize) -> usize {
-        return 3;
-        let mut attempts = 10;
-        loop {
-            let mut rng = rand::rng();
-            let ordered_packets = self.cfg.pattern.order();
 
-            if ordered_packets.is_empty() {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: pattern.order() is empty!"
-                );
-                return 0;
-            }
 
-            let max_idx = ordered_packets.len().saturating_sub(end_offset);
-            let safe_start = start_index.min(max_idx.saturating_sub(1));
-            let safe_end = max_idx.saturating_sub(1);
-
-            if safe_start >= safe_end {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Invalid range, returning 0"
-                );
-                return 0;
-            }
-
-            let idx = rng.random_range(safe_start..=safe_end);
-
-            // Fixed potential panic: check bounds before accessing idx - 1 or idx + 1
-            let is_unique = (idx == 0
-                || ordered_packets[idx].size != ordered_packets[idx - 1].size)
-                || (idx == ordered_packets.len() - 1
-                    || ordered_packets[idx].size != ordered_packets[idx + 1].size);
-
-            if is_unique {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Selected unique index {}",
-                    idx
-                );
-                return idx;
-            } else if attempts <= 0 {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Max attempts reached, returning index {}",
-                    idx
-                );
-                return idx;
-            } else {
-                attempts -= 1;
-            }
-        }
-    }
-
-    async fn inject_client_message(
-        cfg: &FakeCodecCfg,
-        original_packet: Vec<u8>,
-    ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
-        eprintln!("[FakeCodec DEBUG] inject_client_message: Starting");
-        let mut tls_header = (&original_packet[..TLS_HEADER_LEN]).to_vec();
-
-        let mut client_message =
-            ClientHelloStruct::new_with_random_padding(cfg.message_padding_size.clone());
-        client_message.original_packet = original_packet;
-        eprintln!("[FakeCodec DEBUG] inject_client_message: original packet: {:?}", client_message.original_packet);
-        let cred_provider = match cfg.credentials.clone() {
-            CredentialsSide::Server(_) => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_client_message: Invalid credentials side (Server)"
-                );
-                return None;
-            }
-            CredentialsSide::Client(cred) => cred,
-        };
-
-        let creds = match cred_provider.get_client_credentials().await {
-            Some(c) => c,
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_client_message: Failed to get client credentials"
-                );
-                return None;
-            }
-        };
-
-        client_message.login = String::from_utf8_lossy(creds.0.as_slice()).to_string();
-        eprintln!(
-            "[FakeCodec DEBUG] inject_client_message: Client login: {}",
-            client_message.login
-        );
-
-        let res = match Self::make_spake2_client_initial(cred_provider, cfg.server_id.as_slice())
-            .await
-        {
-            Some(r) => r,
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_client_message: Failed to make spake2 client initial"
-                );
-                return None;
-            }
-        };
-        client_message.auth_data = res.0;
-
-        let data = match s_type::to_bytes(&client_message) {
-            Some(d) => d.to_vec(),
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_client_message: Failed to serialize client message"
-                );
-                return None;
-            }
-        };
-
-        let mut msg = match Self::encrypt_message_with_pub_key(
-            data.as_slice(),
-            cfg.public_password.as_slice(),
-        )
-        .await
-        {
-            Some(m) => m,
-            None => {
-                eprintln!("[FakeCodec DEBUG] inject_client_message: Failed to encrypt message");
-                return None;
-            }
-        };
-
-        let record_len = msg.len() as u16;
-        if record_len > TLS_MAX_RECORD_LEN as u16 {
-            eprintln!(
-                "[FakeCodec DEBUG] inject_client_message: Record length {} exceeds max {}",
-                record_len, TLS_MAX_RECORD_LEN
-            );
-            return None;
-        }
-        let record_len_bytes = record_len.to_be_bytes();
-        tls_header[3] = record_len_bytes[0];
-        tls_header[4] = record_len_bytes[1];
-        tls_header.append(&mut msg);
-        eprintln!(
-            "[FakeCodec DEBUG] inject_client_message: Success, final packet len: {}",
-            tls_header.len()
-        );
-        Some((tls_header, res.1))
-    }
-
-    async fn inject_server_message(
-        cfg: &FakeCodecCfg,
-        client_hello: &ClientHelloStruct,
-        original_packet: Vec<u8>,
-    ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
-        eprintln!(
-            "[FakeCodec DEBUG] inject_server_message: Starting for client: {}",
-            client_hello.login
-        );
-        let mut tls_header = (&original_packet[..TLS_HEADER_LEN]).to_vec();
-
-        let mut server_msg =
-            ServerHelloStruct::new_with_random_padding(cfg.message_padding_size.clone());
-        server_msg.original_packet = original_packet;
-
-        let cred_provider = match cfg.credentials.clone() {
-            CredentialsSide::Server(cred) => Some(cred),
-            CredentialsSide::Client(_) => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_server_message: Invalid credentials side (Client)"
-                );
-                None
-            }
-        }?;
-
-        let server_auth = match Self::make_spake2_server_initial(
-            cred_provider,
-            cfg.server_id.as_slice(),
-            client_hello.login.clone(),
-        )
-        .await
-        {
-            Some(sa) => sa,
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_server_message: Failed to make spake2 server initial"
-                );
-                return None;
-            }
-        };
-
-        server_msg.auth_data = server_auth.0;
-
-        let data = match s_type::to_bytes(&server_msg) {
-            Some(d) => d.to_vec(),
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] inject_server_message: Failed to serialize server message"
-                );
-                return None;
-            }
-        };
-
-        let mut msg = match Self::encrypt_message_with_pub_key(
-            data.as_slice(),
-            cfg.public_password.as_slice(),
-        )
-        .await
-        {
-            Some(m) => m,
-            None => {
-                eprintln!("[FakeCodec DEBUG] inject_server_message: Failed to encrypt message");
-                return None;
-            }
-        };
-
-        let record_len = msg.len() as u16;
-        if record_len > TLS_MAX_RECORD_LEN as u16 {
-            eprintln!(
-                "[FakeCodec DEBUG] inject_server_message: Record length {} exceeds max {}",
-                record_len, TLS_MAX_RECORD_LEN
-            );
-            return None;
-        }
-        let record_len_bytes = record_len.to_be_bytes();
-        tls_header[3] = record_len_bytes[0];
-        tls_header[4] = record_len_bytes[1];
-        tls_header.append(&mut msg);
-        eprintln!(
-            "[FakeCodec DEBUG] inject_server_message: Success, final packet len: {}",
-            tls_header.len()
-        );
-        Some((tls_header, server_auth.1))
-    }
-
-    async fn make_client_begin_msg(&self, mut base_tls_header: Vec<u8>) -> Option<Vec<u8>> {
-        let msg = ClientBeginStruct::new_with_random_padding(self.cfg.message_padding_size.clone());
-        let data = s_type::to_bytes(&msg).unwrap().to_vec();
-        let mut data = match Self::encrypt_message_with_pub_key(
-            data.as_slice(),
-            self.cfg.public_password.as_slice(),
-        )
-        .await
-        {
-            Some(d) => d,
-            None => {
-                eprintln!("[FakeCodec DEBUG] make_client_begin_msg: Encryption failed");
-                return None;
-            }
-        };
-        let record_len = data.len() as u16;
-        if record_len > TLS_MAX_RECORD_LEN as u16 {
-            eprintln!(
-                "[FakeCodec DEBUG] make_client_begin_msg: Record length {} exceeds max {}",
-                record_len, TLS_MAX_RECORD_LEN
-            );
-            return None;
-        }
-        let record_len_bytes = record_len.to_be_bytes();
-        base_tls_header[3] = record_len_bytes[0];
-        base_tls_header[4] = record_len_bytes[1];
-        base_tls_header.append(&mut data);
-        Some(base_tls_header)
-    }
-
-    async fn probe_for_client_begin(cfg: &FakeCodecCfg, packet: &[u8]) -> bool {
-        eprintln!(
-            "[FakeCodec DEBUG] probe_for_client_begin: Starting, packet len: {}",
-            packet.len()
-        );
-        if let Some(msg) =
-            Self::decrypt_message_with_pub_key(packet, cfg.public_password.as_slice()).await
-        {
-            if let Ok(open) = s_type::access::<ClientBeginStruct>(msg.as_slice()) {
-                if ClientBeginStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Success");
-                    let _ = open;
-                    return true;
-                } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Validation failed");
-                }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Access failed");
-            }
-        } else {
-            eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Decryption failed");
-        }
-        false
-    }
-
-    async fn probe_for_server_hello_struct(
-        cfg: &FakeCodecCfg,
-        packet: &[u8],
-    ) -> Option<ServerHelloStruct> {
-        eprintln!(
-            "[FakeCodec DEBUG] probe_for_server_hello_struct: Starting, packet len: {}",
-            packet.len()
-        );
-        if let Some(msg) =
-            Self::decrypt_message_with_pub_key(&packet, cfg.public_password.as_slice()).await
-        {
-            if let Ok(open) = s_type::access::<ServerHelloStruct>(msg.as_slice()) {
-                if ServerHelloStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Success");
-                    let _ = open;
-                    return Some(s_type::from_slice(msg.as_slice()).unwrap());
-                } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Validation failed");
-                }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Access failed");
-            }
-        } else {
-            eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Decryption failed");
-        }
-        None
-    }
-
-    async fn probe_for_client_hello_struct(
-        cfg: &FakeCodecCfg,
-        data: &[u8],
-    ) -> Option<ClientHelloStruct> {
-        eprintln!(
-            "[FakeCodec DEBUG] probe_for_client_hello_struct: Starting, data len: {}",
-            data.len()
-        );
-        if let Some(msg) =
-            Self::decrypt_message_with_pub_key(data, cfg.public_password.as_slice()).await
-        {
-            if let Ok(open) = s_type::access::<ClientHelloStruct>(msg.as_slice()) {
-                if ClientHelloStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Success");
-                    let _ = open;
-                    return Some(s_type::from_slice(msg.as_slice()).unwrap());
-                } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Validation failed");
-                }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Access failed");
-            }
-        } else {
-            eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Decryption failed");
-        }
-        None
-    }
-
-    async fn make_spake2_client_initial(
-        cred: Arc<dyn ClientCredentialProvider>,
-        server_id: &[u8],
-    ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
-        let creds = match cred.get_client_credentials().await {
-            Some(c) => c,
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] make_spake2_client_initial: get_client_credentials returned None"
-                );
-                return None;
-            }
-        };
-        let (spake, outbound_msg) = Spake2::<Ed25519Group>::start_a(
-            &Password::new(creds.1.as_slice()),
-            &Identity::new(creds.0.as_slice()),
-            &Identity::new(server_id),
-        );
-        eprintln!("[FakeCodec DEBUG] make_spake2_client_initial: SPAKE2 start_a successful");
-        Some((outbound_msg, spake))
-    }
-
-    async fn make_spake2_server_initial(
-        cred_provider: Arc<dyn ServerCredentialProvider>,
-        server_id: &[u8],
-        client_id: String,
-    ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
-        let password = match cred_provider.get_client_password(&client_id).await {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "[FakeCodec DEBUG] make_spake2_server_initial: get_client_password returned None for client_id: {}",
-                    client_id
-                );
-                return None;
-            }
-        };
-        let client_identity = client_id.as_bytes();
-        let (spake, outbound_msg) = Spake2::<Ed25519Group>::start_b(
-            &Password::new(password),
-            &Identity::new(client_identity),
-            &Identity::new(server_id),
-        );
-        eprintln!("[FakeCodec DEBUG] make_spake2_server_initial: SPAKE2 start_b successful");
-        Some((outbound_msg, spake))
-    }
-
-    async fn encrypt_message_with_pub_key(msg: &[u8], key: &[u8]) -> Option<Vec<u8>> {
-        let res = aes256_gcm_encrypt(key, msg);
-        if res.is_err() {
-            eprintln!(
-                "[FakeCodec DEBUG] encrypt_message_with_pub_key: aes256_gcm_encrypt failed: {:?}",
-                res.err().unwrap()
-            );
-            return None;
-        }
-        res.ok()
-    }
-
-    async fn decrypt_message_with_pub_key(msg: &[u8], key: &[u8]) -> Option<Vec<u8>> {
-        let res = aes256_gcm_decrypt(key, msg);
-        if res.is_err() {
-            eprintln!(
-                "[FakeCodec DEBUG] decrypt_message_with_pub_key: aes256_gcm_decrypt failed: {:?}",
-                res.err().unwrap()
-            );
-            return None;
-        }
-        res.ok()
-    }
 }

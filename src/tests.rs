@@ -103,8 +103,23 @@ struct TlsPatternTestStruct{
 
 #[tokio::test]
 async fn test_tls_pattern() {
+   let pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+
+    println!("Packets from client");
+
+    pattern.0.known_packet_sizes().iter().for_each(|p|{
+        println!("Size {} repeat times {}",p.size, p.repeat_times);
+    });
+    println!("Packets from server");
+
+    pattern.1.known_packet_sizes().iter().for_each(|p|{
+        println!("Size {} repeat times {}",p.size, p.repeat_times);
+    })
+}
+//returns (client pattern, server pattern)
+async fn make_tls_pattern(target_dest: String, target_sni: String) -> (ConnectionPattern, ConnectionPattern){
     let proxy = ProxyInterface::new(9999).await;
-    let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
+    let endpoint = ProxyEndpoint::new(target_dest)
         .await
         .expect("Failed to create proxy endpoint");
     let stop_sig = broadcast::channel(1);
@@ -126,14 +141,14 @@ async fn test_tls_pattern() {
     });
 
     let client = Client::builder()
-        .emulation(Emulation::Chrome149)
+        .emulation(Emulation::Firefox151)
         .proxy(Proxy::https("http://127.0.0.1:9999/").unwrap())
         .build()
         .expect("client");
 
     // let resp = client.get("https://tls.peet.ws/api/all").send().await.expect("response");
     let resp = client
-        .get("https://www.google.com/")
+        .get(target_sni)
         .send()
         .await
         .expect("response");
@@ -143,20 +158,12 @@ async fn test_tls_pattern() {
         .expect("TODO: panic message");
     file.flush().expect("flush");
     stop_sig.0.send(()).unwrap();
+
     let mut reasm_lock1 = reassembler1.lock().await;
     let mut reasm_lock2 = reassembler2.lock().await;
     reasm_lock1.patternizer.finalize();
     reasm_lock2.patternizer.finalize();
-    println!("Packets from client");
-
-    reasm_lock1.patternizer.known_packet_sizes().iter().for_each(|p|{
-        println!("Size {} repeat times {}",p.size, p.repeat_times);
-    });
-    println!("Packets from server");
-
-    reasm_lock2.patternizer.known_packet_sizes().iter().for_each(|p|{
-        println!("Size {} repeat times {}",p.size, p.repeat_times);
-    })
+    (reasm_lock1.patternizer.clone(), reasm_lock2.patternizer.clone())
 }
 
 
@@ -180,23 +187,11 @@ impl ClientCredentialProvider for TestClientCredProvider{
 }
 
 pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
-    let mut connection_pattern = ConnectionPattern::new();
-    connection_pattern.insert_packet(UsedPacketSize{size: 1024, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 995, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1024, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 995, repeat_times: 1});
-    connection_pattern.finalize();
+    let mut connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
 
 
     let mut cfg_serv = FakeCodecCfg{
-        pattern: connection_pattern,
+        pattern: connection_pattern.1,
         public_password: pbk_key,
         credentials: CredentialsSide::Server(Arc::new(TestServerCredProvider{})),
         target_sni: "https://www.google.com/".to_string(),
@@ -206,7 +201,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
             .next()
             .unwrap() ,
         setup_proxy_port: 7756,
-        target_browser: Emulation::Chrome149.into_emulation(),
+        target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
     };
@@ -270,7 +265,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
             .next()
             .unwrap() ,
         setup_proxy_port: 7756,
-        target_browser: Emulation::Chrome149.into_emulation(),
+        target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
     };
