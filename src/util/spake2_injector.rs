@@ -1,6 +1,6 @@
 use std::mem;
 use std::sync::Arc;
-use rand::Rng;
+use rand::{random_range, Rng};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use tfserver::structures::s_type;
 use tokio_util::bytes::Bytes;
@@ -32,11 +32,11 @@ pub struct Spake2Injector {
 
 impl Spake2Injector {
     pub fn new( cfg: FakeCodecCfg) -> Self {
-        let offsets = match cfg.credentials{
-            CredentialsSide::Server(_) => {(0usize, 1usize)}
-            CredentialsSide::Client(_) => {(1,1)}
+        let target_packet = match cfg.credentials{
+            CredentialsSide::Server(_) => {random_range(1usize..3)}
+            CredentialsSide::Client(_) => {Self::select_packet_from_pattern(&cfg.pattern, 1, 1)}
         };
-        let target_packet = Self::select_packet_from_pattern(&cfg.pattern, offsets.0, offsets.1);
+        eprintln!("Spake2Injector: target_packet={}", target_packet);
 
         Self{state: Spake2State::Begin, cfg, tx_counter: 0, rx_counter: 0, target_packet}
     }
@@ -101,8 +101,7 @@ impl Spake2Injector {
                     if let Some(mut hello) = Self::probe_for_client_hello_struct(&self.cfg, &data.as_ref()[TLS_HEADER_LEN..]).await {
                         let data = mem::replace(&mut hello.original_packet, vec![]);
                         self.state = FirstPartNegotiated(FirstPartSpake2::Server(hello));
-                        self.target_packet = Self::select_packet_from_pattern(&self.cfg.pattern, self.tx_counter, 1)
-                            .max(self.tx_counter + 1);
+                        self.tx_counter = 0;
                         return Some(Bytes::from(data));
                     }
                 }
@@ -540,54 +539,30 @@ impl Spake2Injector {
     }
 
     fn select_packet_from_pattern(pattern: &ConnectionPattern, start_index: usize, end_offset: usize) -> usize {
-        return 3;
-        //Still broken
+        let ordered_packets = pattern.order();
+        if ordered_packets.is_empty() {
+            eprintln!("[FakeCodec DEBUG] select_packet_from_pattern: pattern.order() is empty!");
+            return start_index + 1;
+        }
+
+        let start = pattern.overall_idx_to_order_idx(start_index);
+        let end = pattern.overall_idx_to_order_idx_backwards(end_offset);
+
+        if start >= end {
+            eprintln!("[FakeCodec DEBUG] select_packet_from_pattern: Invalid range ({start}..{end}), falling back");
+            return start_index + 1;
+        }
+
         let mut attempts = 10;
+        let mut rng = rand::rng();
         loop {
-            let mut rng = rand::rng();
-            let ordered_packets = pattern.order();
+            let order_idx = rng.random_range(start..end);
 
-            if ordered_packets.is_empty() {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: pattern.order() is empty!"
-                );
-                return 0;
+            if ordered_packets[order_idx].repeat_times == 1 || attempts <= 1 {
+
+                return pattern.order_idx_to_overall_idx(order_idx).max(start_index + 1);
             }
-
-            let max_idx = ordered_packets.len().saturating_sub(end_offset);
-            let safe_start = start_index.min(max_idx.saturating_sub(1));
-            let safe_end = max_idx.saturating_sub(1);
-
-            if safe_start >= safe_end {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Invalid range, returning 0"
-                );
-                return 0;
-            }
-
-            let idx = rng.random_range(safe_start..=safe_end);
-
-            // Fixed potential panic: check bounds before accessing idx - 1 or idx + 1
-            let is_unique = (idx == 0
-                || ordered_packets[idx].size != ordered_packets[idx - 1].size)
-                || (idx == ordered_packets.len() - 1
-                || ordered_packets[idx].size != ordered_packets[idx + 1].size);
-
-            if is_unique {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Selected unique index {}",
-                    idx
-                );
-                return idx;
-            } else if attempts <= 0 {
-                eprintln!(
-                    "[FakeCodec DEBUG] select_packet_from_pattern: Max attempts reached, returning index {}",
-                    idx
-                );
-                return idx;
-            } else {
-                attempts -= 1;
-            }
+            attempts -= 1;
         }
     }
 

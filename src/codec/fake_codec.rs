@@ -3,10 +3,12 @@ use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
 use crate::http_proxy::proxy_interface::ProxyInterface;
 use crate::strategy::ConnectionPattern;
 use crate::util::crypt_util::{aes256_gcm_decrypt, aes256_gcm_encrypt};
-use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
+use crate::util::io_util::{receive_message, send_message, SenderSideChannel};
 use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, ServerHelloStruct};
 use crate::util::session_keys::SessionKeys;
-use futures_util::{Sink, StreamExt};
+use crate::util::spake2_injector::{is_application_data, Spake2Injector, Spake2State};
+
+use futures_util::{Sink, SinkExt, StreamExt};
 use nom::Offset;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::fmt::format;
@@ -17,7 +19,6 @@ use std::time::Duration;
 use std::{io, mem};
 use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
-use tfserver::futures_util::SinkExt;
 use tfserver::rand;
 use tfserver::rand::Rng;
 use tfserver::structures::s_type;
@@ -26,7 +27,6 @@ use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
 use wreq::{Client, Emulation, Proxy};
-use crate::util::spake2_injector::{is_application_data, Spake2Injector, Spake2State};
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -55,7 +55,6 @@ pub trait ServerCredentialProvider: Send + Sync + 'static {
 
 #[async_trait]
 pub trait ClientCredentialProvider: Send + Sync + 'static {
-    ///Return 0 - client identity, 1 - client password
     async fn get_client_credentials(&self) -> Option<(Vec<u8>, Vec<u8>)>;
 }
 
@@ -132,8 +131,6 @@ impl Encoder<Bytes> for FakeCodec {
             ));
         }
 
-        // base_tls_header only supplies content-type/version bytes [0..3];
-        // bytes [3..5] (length) must reflect *this* record, not the captured one.
         let mut header = self.base_tls_header.as_ref().unwrap().clone();
         let len_bytes = (buf.len() as u16).to_be_bytes();
         header[3] = len_bytes[0];
@@ -211,73 +208,79 @@ impl FakeCodec {
 
         loop {
             tokio::select! {
-            resp = &mut req_fut, if !req_done => {
-                req_done = true;
-                if let Err(err) = resp {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
-                    return None;
-                }
-                eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
-
-                let header = base_tls_header.clone().unwrap_or_else(|| {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
-                    vec![0; TLS_HEADER_LEN]
-                });
-
-                if let Some(msg) = injector.make_client_begin_msg(header).await {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
-                    if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
+                resp = &mut req_fut, if !req_done => {
+                    req_done = true;
+                    if let Err(err) = resp {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
+                        return None;
                     }
-                } else {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to make client begin msg");
-                }
-                break;
-            }
-            packet_to_send = local_proxy.1.from_endpoint_rcv.recv() => {
-                let Some(packet) = packet_to_send else {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
+                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
+                    match injector.state() {
+                        Spake2State::SecondPartNegotiated(_) => {
+                            let header = base_tls_header.clone().unwrap_or_else(|| {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
+                                vec![0; TLS_HEADER_LEN]
+                            });
+                            if let Some(msg) = injector.make_client_begin_msg(header).await {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
+                                if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
+                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
+                                }
+                            } else {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to make client begin msg");
+                            }
+                        }
+                        _ => {
+                            eprintln!("Failed to handshake");
+                            return None;
+                        }
+                    }
                     break;
-                };
-                if base_tls_header.is_none() && is_application_data(&packet) {
-                    base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
                 }
-                match injector.on_local_packet(packet).await {
-                    Some(out) => {
-                        if send_message(&mut temp_transport, out).await.is_err() {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
+                packet_to_send = local_proxy.1.from_endpoint_rcv.recv() => {
+                    let Some(packet) = packet_to_send else {
+                        eprintln!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
+                        break;
+                    };
+                    if base_tls_header.is_none() && is_application_data(&packet) {
+                        base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
+                    }
+                    match injector.on_local_packet(packet).await {
+                        Some(out) => {
+                            if send_message(&mut temp_transport, out).await.is_err() {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
+                                break;
+                            }
+                        }
+                        None => {
+                            eprintln!("[FakeCodec DEBUG] handshake_from_client: injection failed, aborting");
                             break;
                         }
                     }
-                    None => {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: injection failed, aborting");
-                        break;
-                    }
                 }
-            }
-            recv_packet = receive_message(&mut temp_transport) => {
-                match recv_packet {
-                    Ok(Some(data)) => {
-                        match injector.on_remote_packet(data.freeze()).await {
-                            Some(out) => {
-                                let _ = local_proxy.1.to_endpoint_snd.send(out).await;
+                recv_packet = receive_message(&mut temp_transport) => {
+                    match recv_packet {
+                        Ok(Some(data)) => {
+                            match injector.on_remote_packet(data.freeze()).await {
+                                Some(out) => {
+                                    let _ = local_proxy.1.to_endpoint_snd.send(out).await;
+                                }
+                                None => {
+                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: finish failed, aborting");
+                                    break;
+                                }
                             }
-                            None => {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_client: finish failed, aborting");
+                        }
+                        Ok(None) => {}
+                        Err(terminates) => {
+                            eprintln!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
+                            if terminates {
                                 break;
                             }
                         }
                     }
-                    Ok(None) => {}
-                    Err(terminates) => {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
-                        if terminates {
-                            break;
-                        }
-                    }
                 }
             }
-        }
         }
 
         let shared = match injector.state() {
@@ -286,7 +289,8 @@ impl FakeCodec {
         };
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_client: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(), base_tls_header.is_some()
+            shared.is_some(),
+            base_tls_header.is_some()
         );
         Some((shared?, base_tls_header?))
     }
@@ -303,55 +307,52 @@ impl FakeCodec {
 
         loop {
             tokio::select! {
-            recv_packet = receive_message(&mut temp_transport) => {
-                match recv_packet {
-                    Ok(Some(data)) => {
-                        match injector.on_remote_packet(data.freeze()).await {
-                            Some(out) => {
-                                if self.try_send_to_remote(&mut proxy_endpoint, out).await.is_none() {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: failed to forward to remote");
+                recv_packet = receive_message(&mut temp_transport) => {
+                    match recv_packet {
+                        Ok(Some(data)) => {
+                            match injector.on_remote_packet(data.freeze()).await {
+                                Some(out) => {
+                                    if self.try_send_to_remote(&mut proxy_endpoint, out).await.is_none() {
+                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: failed to forward to remote");
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
                                     break;
                                 }
                             }
-                            // Only reachable on the client's ClientBegin (success) since that's
-                            // the sole None case for the server's on_remote_packet.
-                            None => {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
+                        }
+                        Ok(None) => {}
+                        Err(terminates) => {
+                            eprintln!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
+                            if terminates {
                                 break;
                             }
                         }
                     }
-                    Ok(None) => {}
-                    Err(terminates) => {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
-                        if terminates {
+                }
+                packet_to_send = self.get_from_remote(&mut proxy_endpoint) => {
+                    let Some(packet) = packet_to_send else {
+                        continue;
+                    };
+                    if base_tls_header.is_none() && is_application_data(&packet) {
+                        base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
+                    }
+                    match injector.on_local_packet(packet).await {
+                        Some(out) => {
+                            if send_message(&mut temp_transport, out).await.is_err() {
+                                eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
+                                break;
+                            }
+                        }
+                        None => {
+                            eprintln!("[FakeCodec DEBUG] handshake_from_server: injection failed, aborting");
                             break;
                         }
                     }
                 }
             }
-            packet_to_send = self.get_from_remote(&mut proxy_endpoint) => {
-                let Some(packet) = packet_to_send else {
-                    //eprintln!("[FakeCodec DEBUG] handshake_from_server: remote channel closed or not yet connected");
-                    continue;
-                };
-                if base_tls_header.is_none() && is_application_data(&packet) {
-                    base_tls_header = Some(packet[..TLS_HEADER_LEN].to_vec());
-                }
-                match injector.on_local_packet(packet).await {
-                    Some(out) => {
-                        if send_message(&mut temp_transport, out).await.is_err() {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
-                            break;
-                        }
-                    }
-                    None => {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_server: injection failed, aborting");
-                        break;
-                    }
-                }
-            }
-        }
         }
 
         let shared = match injector.state() {
@@ -360,7 +361,8 @@ impl FakeCodec {
         };
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(), base_tls_header.is_some()
+            shared.is_some(),
+            base_tls_header.is_some()
         );
         Some((shared?, base_tls_header?))
     }
@@ -386,13 +388,18 @@ impl FakeCodec {
         data: Bytes,
     ) -> Option<()> {
         if remote.is_none() {
-            remote.replace(match ProxyEndpoint::new(self.cfg.target_sni_connection_dest.clone()).await {
-                Ok(ep) => ep,
-                Err(e) => {
-                    eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to create ProxyEndpoint: {}", e);
-                    return None;
-                }
-            });
+            remote.replace(
+                match ProxyEndpoint::new(self.cfg.target_sni_connection_dest.clone()).await {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        eprintln!(
+                            "[FakeCodec DEBUG] handshake_from_server: Failed to create ProxyEndpoint: {}",
+                            e
+                        );
+                        return None;
+                    }
+                },
+            );
         }
         if let Some((_, sender)) = remote {
             sender.to_endpoint_snd.send(data).await.ok()?;
@@ -401,6 +408,7 @@ impl FakeCodec {
             None
         }
     }
+
     async fn get_from_remote(
         &self,
         remote: &mut Option<(ProxyEndpoint, SenderSideChannel)>,
@@ -411,7 +419,4 @@ impl FakeCodec {
             None
         }
     }
-
-
-
 }

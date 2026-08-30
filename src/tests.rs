@@ -239,23 +239,12 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
 }
 
 pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
-    let mut connection_pattern = ConnectionPattern::new();
-    connection_pattern.insert_packet(UsedPacketSize{size: 1024, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 995, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 1395, repeat_times: 1});
-    connection_pattern.insert_packet(UsedPacketSize{size: 1024, repeat_times: 1 });
-    connection_pattern.insert_packet(UsedPacketSize{size: 995, repeat_times: 1});
-    connection_pattern.finalize();
+    let mut connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+
 
 
     let mut cfg_client = FakeCodecCfg{
-        pattern: connection_pattern,
+        pattern: connection_pattern.0,
         public_password: pbk_key,
         credentials: CredentialsSide::Client(Arc::new(TestClientCredProvider{})),
         target_sni: "https://www.google.com/".to_string(),
