@@ -1,15 +1,15 @@
-use std::mem;
-use std::sync::Arc;
-use rand::{random_range, Rng};
-use spake2::{Ed25519Group, Identity, Password, Spake2};
-use tfserver::structures::s_type;
-use tokio_util::bytes::Bytes;
 use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider};
+use crate::codec::spake2_injector::Spake2State::FirstPartNegotiated;
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN};
 use crate::strategy::ConnectionPattern;
 use crate::util::crypt_util::{aes256_gcm_decrypt, aes256_gcm_encrypt};
 use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, ServerHelloStruct};
-use crate::util::spake2_injector::Spake2State::FirstPartNegotiated;
+use rand::{Rng, random_range};
+use spake2::{Ed25519Group, Identity, Password, Spake2};
+use std::mem;
+use std::sync::Arc;
+use tfserver::structures::s_type;
+use tokio_util::bytes::Bytes;
 
 pub enum FirstPartSpake2{
     Client(Option<Spake2<Ed25519Group>>),

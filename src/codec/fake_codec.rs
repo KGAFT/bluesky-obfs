@@ -1,31 +1,23 @@
+use crate::codec::spake2_injector::{Spake2Injector, Spake2State, is_application_data};
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN, TlsCodec};
 use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
 use crate::http_proxy::proxy_interface::ProxyInterface;
 use crate::strategy::ConnectionPattern;
-use crate::util::crypt_util::{aes256_gcm_decrypt, aes256_gcm_encrypt};
-use crate::util::io_util::{receive_message, send_message, SenderSideChannel};
-use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, ServerHelloStruct};
+use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
 use crate::util::session_keys::SessionKeys;
-use crate::util::spake2_injector::{is_application_data, Spake2Injector, Spake2State};
 
 use futures_util::{Sink, SinkExt, StreamExt};
-use nom::Offset;
-use spake2::{Ed25519Group, Identity, Password, Spake2};
-use std::fmt::format;
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{io, mem};
+use std::io;
 use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
-use tfserver::rand;
-use tfserver::rand::Rng;
-use tfserver::structures::s_type;
 use tfserver::structures::temp_transport::TempTransport;
 use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
-use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
+use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
 
 #[derive(Clone)]

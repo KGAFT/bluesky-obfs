@@ -9,11 +9,12 @@ pub struct UsedPacketSize{
 #[derive(Clone, Default)]
 pub struct ConnectionPattern {
     ///packets sorted by size in descending order, the repeat_times represent how much packet was repeated at all time
-    known_packet_sizes: Vec<UsedPacketSize>,
+    known_packet_sizes: HashMap<usize, usize>,
     ///packets are ordered as they coming after connect after last ChangeCipherSpec,
     /// maybe needed when needed to pick in which place inject target packet
     order: Vec<UsedPacketSize>,
     order_overall_len: usize,
+    bandwidth_overall_len: usize,
 }
 
 impl ConnectionPattern {
@@ -22,12 +23,9 @@ impl ConnectionPattern {
     }
     pub fn insert_packet(&mut self, mut packet: UsedPacketSize){
         let mut found_known = false;
-        for i in 0..self.known_packet_sizes.len() {
-            if self.known_packet_sizes[i].size == packet.size{
-                found_known = true;
-                self.known_packet_sizes[i].repeat_times+=1;
-                break;
-            }
+        if let Some(known_size_repeat) = self.known_packet_sizes.get_mut(&packet.size) {
+            found_known = true;
+            *known_size_repeat+=1;
         }
         if !self.order.is_empty(){
             let order_max_idx = self.order.len()-1;
@@ -43,13 +41,13 @@ impl ConnectionPattern {
 
         if !found_known {
             packet.repeat_times = 1;
-            self.known_packet_sizes.push(packet);
+            self.known_packet_sizes.insert(packet.size, packet.repeat_times);
         }
     }
     pub fn finalize(&mut self){
-        self.known_packet_sizes.sort_unstable_by_key(|el| Reverse(el.repeat_times));
         for x in self.order.iter() {
             self.order_overall_len += x.repeat_times
+            self.bandwidth_overall_len+=x.size*x.repeat_times;
         }
     }
 
@@ -76,8 +74,12 @@ impl ConnectionPattern {
         counter
     }
 
-    pub fn known_packet_sizes(&self) -> &Vec<UsedPacketSize> {
+    pub fn known_packet_sizes(&self) -> &HashMap<usize, usize> {
         &self.known_packet_sizes
+    }
+
+    pub fn check_if_size_exists(&self, size: usize) ->bool{
+        self.known_packet_sizes.contains_key(&size)
     }
     
     pub fn clear(&mut self) {
@@ -87,5 +89,13 @@ impl ConnectionPattern {
 
     pub fn order(&self) -> &Vec<UsedPacketSize> {
         &self.order
+    }
+
+    pub fn order_overall_len(&self) -> usize {
+        self.order_overall_len
+    }
+
+    pub fn bandwidth_overall_len(&self) -> usize {
+        self.bandwidth_overall_len
     }
 }
