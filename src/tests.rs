@@ -20,6 +20,7 @@ use tokio_util::codec::Framed;
 use wreq::{Client, IntoEmulation, Proxy};
 use wreq_util::Emulation;
 use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodec, FakeCodecCfg, ServerCredentialProvider};
+use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 use crate::strategy::{ConnectionPattern, UsedPacketSize};
 use crate::util::rand_util::generate_random_u8_vec;
 
@@ -108,12 +109,12 @@ async fn test_tls_pattern() {
     println!("Packets from client");
 
     pattern.0.known_packet_sizes().iter().for_each(|p|{
-        println!("Size {} repeat times {}",p.size, p.repeat_times);
+        println!("Size {} repeat times {}",p.0, p.1);
     });
     println!("Packets from server");
 
     pattern.1.known_packet_sizes().iter().for_each(|p|{
-        println!("Size {} repeat times {}",p.size, p.repeat_times);
+        println!("Size {} repeat times {}",p.0, p.1);
     })
 }
 //returns (client pattern, server pattern)
@@ -188,7 +189,8 @@ impl ClientCredentialProvider for TestClientCredProvider{
 
 pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
     let mut connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
-
+    let mut rate_limiter_cfg = FakeCodecRateLimiterCfg::default();
+    rate_limiter_cfg.client_pattern = connection_pattern.0;
 
     let mut cfg_serv = FakeCodecCfg{
         pattern: connection_pattern.1,
@@ -204,6 +206,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
+        rate_limiter: Some(rate_limiter_cfg),
     };
 
     let listener = TcpListener::bind("127.0.0.1:9984").await.unwrap();
@@ -239,7 +242,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
 }
 
 pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
-    let mut connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+    let connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
 
 
 
@@ -257,6 +260,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
+        rate_limiter: None,
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
@@ -314,11 +318,8 @@ pub fn test_record_pattern(
         let mut data_lock = app_data.lock().await;
         let records = data_lock.reassembler.inspect_bytes(packet);
         records.iter().for_each(|record| {
-            if record.header.record_type == TlsRecordType::ChangeCipherSpec{
-                data_lock.patternizer.clear();
-            }
             if record.header.record_type == TlsRecordType::ApplicationData{
-                data_lock.patternizer.insert_packet(UsedPacketSize{size: record.header.len as usize, repeat_times: 0});
+                data_lock.patternizer.insert_packet(UsedPacketSize{size: packet.len(), repeat_times: 0});
             }
         });
     })

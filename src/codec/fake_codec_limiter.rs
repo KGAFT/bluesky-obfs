@@ -1,9 +1,10 @@
 use crate::strategy::ConnectionPattern;
-
+#[derive(Clone)]
 pub struct FakeCodecRateLimiterCfg {
     pub bandwidth_max_derivation_percent: f64,
     pub packet_count_max_derivation_percent: f64,
     pub out_of_pattern_packets_max_ratio_percent: f64,
+    pub client_pattern: ConnectionPattern
 }
 
 impl Default for FakeCodecRateLimiterCfg {
@@ -15,6 +16,7 @@ impl Default for FakeCodecRateLimiterCfg {
             packet_count_max_derivation_percent: 0.2f64,
             //50%
             out_of_pattern_packets_max_ratio_percent: 0.5f64,
+            client_pattern: Default::default(),
         }
     }
 }
@@ -28,9 +30,9 @@ pub struct FakeCodecRateLimiter {
 }
 
 impl FakeCodecRateLimiter {
-    pub fn new(client_pattern: ConnectionPattern, security_cfg: FakeCodecRateLimiterCfg) -> Self {
+    pub fn new( security_cfg: FakeCodecRateLimiterCfg) -> Self {
         Self {
-            client_pattern,
+            client_pattern: security_cfg.client_pattern.clone(),
             bandwidth_counter: 0,
             packet_counter: 0,
             out_of_pattern_packet: vec![],
@@ -46,12 +48,12 @@ impl FakeCodecRateLimiter {
         }
     }
     pub fn check_if_valid(&self) -> bool {
-        if self.packet_counter as f64 / self.client_pattern.order_overall_len() as f64
+        if self.packet_counter as f64/ self.client_pattern.order_overall_len() as f64  -1f64
             > self.cfg.packet_count_max_derivation_percent
         {
             return false;
         }
-        if self.bandwidth_counter as f64 / self.client_pattern.bandwidth_overall_len() as f64
+        if self.bandwidth_counter as f64 / self.client_pattern.bandwidth_overall_len()  as f64 -1f64
             > self.cfg.bandwidth_max_derivation_percent
         {
             return false;

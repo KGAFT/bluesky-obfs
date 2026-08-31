@@ -23,6 +23,10 @@ impl ConnectionPattern {
     }
     pub fn insert_packet(&mut self, mut packet: UsedPacketSize){
         let mut found_known = false;
+        packet.repeat_times = 1;
+
+        self.order_overall_len += packet.repeat_times;
+        self.bandwidth_overall_len+=packet.size*packet.repeat_times;
         if let Some(known_size_repeat) = self.known_packet_sizes.get_mut(&packet.size) {
             found_known = true;
             *known_size_repeat+=1;
@@ -40,15 +44,11 @@ impl ConnectionPattern {
         }
 
         if !found_known {
-            packet.repeat_times = 1;
+
             self.known_packet_sizes.insert(packet.size, packet.repeat_times);
         }
     }
     pub fn finalize(&mut self){
-        for x in self.order.iter() {
-            self.order_overall_len += x.repeat_times
-            self.bandwidth_overall_len+=x.size*x.repeat_times;
-        }
     }
 
     pub fn overall_idx_to_order_idx(&self, idx: usize) -> usize {

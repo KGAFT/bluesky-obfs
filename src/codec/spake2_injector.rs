@@ -10,6 +10,7 @@ use std::mem;
 use std::sync::Arc;
 use tfserver::structures::s_type;
 use tokio_util::bytes::Bytes;
+use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter, FakeCodecRateLimiterCfg};
 
 pub enum FirstPartSpake2{
     Client(Option<Spake2<Ed25519Group>>),
@@ -27,21 +28,27 @@ pub struct Spake2Injector {
     tx_counter: usize,
     rx_counter: usize,
     cfg: FakeCodecCfg,
-    target_packet: usize
+    target_packet: usize,
+    rate_limiter: Option<FakeCodecRateLimiter>,
 }
 
 impl Spake2Injector {
-    pub fn new( cfg: FakeCodecCfg) -> Self {
+    pub fn new(mut cfg: FakeCodecCfg) -> Self {
         let target_packet = match cfg.credentials{
             CredentialsSide::Server(_) => {random_range(1usize..3)}
             CredentialsSide::Client(_) => {Self::select_packet_from_pattern(&cfg.pattern, 1, 1)}
         };
         eprintln!("Spake2Injector: target_packet={}", target_packet);
-
-        Self{state: Spake2State::Begin, cfg, tx_counter: 0, rx_counter: 0, target_packet}
+        let rate_limiter = if let Some(limiter_cfg) = cfg.rate_limiter.take(){
+            Some(FakeCodecRateLimiter::new(limiter_cfg))
+        } else {
+            None
+        };
+        Self{state: Spake2State::Begin, cfg, tx_counter: 0, rx_counter: 0, target_packet, rate_limiter}
     }
 
     pub async fn on_remote_packet(&mut self, data: Bytes) -> Option<Bytes> {
+
         match &self.cfg.credentials{
             CredentialsSide::Server(_) => {self.on_server_side_remote_packet(data).await},
             CredentialsSide::Client(_) => {
@@ -51,6 +58,8 @@ impl Spake2Injector {
     }
 
     pub async fn on_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
+
+
         match &self.cfg.credentials{
             CredentialsSide::Server(_) => {self.on_server_side_local_packet(data).await},
             CredentialsSide::Client(_) => {
@@ -62,6 +71,7 @@ impl Spake2Injector {
 
 
     async fn on_server_side_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
+
         let is_app = is_application_data(&data);
         match &self.state {
             Spake2State::Begin => {
@@ -94,6 +104,15 @@ impl Spake2Injector {
 
     async fn on_server_side_remote_packet(&mut self, data: Bytes) -> Option<Bytes> {
         let is_app = is_application_data(&data);
+
+        if is_app && let Some(limiter) = self.rate_limiter.as_mut() {
+            limiter.register_client_packet(data.as_ref());
+            if !limiter.check_if_valid(){
+                return None;
+            }
+        }
+
+
         match &self.state {
             Spake2State::Begin => {
                 if is_app {

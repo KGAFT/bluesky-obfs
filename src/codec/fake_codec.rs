@@ -19,6 +19,7 @@ use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
+use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -32,6 +33,7 @@ pub struct FakeCodecCfg {
     pub target_browser: Emulation,
     pub message_padding_size: Range<usize>,
     pub server_id: Vec<u8>,
+    pub rate_limiter: Option<FakeCodecRateLimiterCfg>
 }
 
 #[derive(Clone)]
