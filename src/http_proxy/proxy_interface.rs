@@ -62,7 +62,7 @@ async fn handle_connect(
 ) {
     let tx = channel.from_endpoint_snd;
     let mut rx = channel.to_endpoint_rcv;
-    let client = await_client(listener, &mut stop_sig).await;
+    let client = await_client(&listener, &mut stop_sig).await;
     if client.is_none() {
         return;
     }
@@ -150,21 +150,11 @@ async fn proxy_setup(client: &mut TcpStream) -> Option<String> {
 }
 
 async fn await_client(
-    listener: TcpListener,
+    listener: &TcpListener,
     stop_sig: &mut broadcast::Receiver<()>,
 ) -> Option<(TcpStream, SocketAddr)> {
     tokio::select! {
-      _ = stop_sig.recv() => None,
-
-      result = async {
-          loop {
-              match listener.accept().await {
-                  Ok(client) => break client,
-                  Err(e) => {
-                      eprintln!("accept failed: {e}");
-                  }
-              }
-          }
-      } => Some(result),
-  }
+        _ = stop_sig.recv() => None,
+        result = listener.accept() => result.ok(),
+    }
 }

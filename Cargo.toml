@@ -11,6 +11,10 @@ name = "server"
 path = "src/client_main.rs"
 name = "client"
 
+[lib]
+path = "src/lib.rs"
+name = "bsobfs"
+
 [dependencies]
 the-fourth-server = "0.4"
 wreq = {version = "6.0.0-rc.31", features = ["tokio-rt"]}

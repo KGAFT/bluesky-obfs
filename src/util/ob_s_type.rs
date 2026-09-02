@@ -8,15 +8,16 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use tfserver::structures::s_type::{StrongType, StructureType};
 use tfserver::{impl_strong_type, impl_structure_type};
-
+use crate::strategy::{ConnectionPattern, ArchivedConnectionPattern};
 #[repr(u8)]
 #[derive(
-    Serialize, Deserialize, PartialEq, Clone, Hash, Eq, TryFromPrimitive, Copy, Debug, Archive,
-)]
+    Serialize, Deserialize, PartialEq, Clone, Hash, Eq, TryFromPrimitive, Copy, Debug, Archive, Default)]
 pub enum ObSType {
+    #[default]
     ClientHello,
     ServerHello,
-    ClientBegin
+    ClientBegin,
+    ConnectionPatternE
 }
 
 impl_structure_type!(
@@ -24,6 +25,7 @@ impl_structure_type!(
     ClientHello => (ClientHelloStruct, ArchivedClientHelloStruct),
     ServerHello => (ServerHelloStruct, ArchivedServerHelloStruct),
     ClientBegin => (ClientBeginStruct, ArchivedClientBeginStruct),
+    ConnectionPatternE => (ConnectionPattern, ArchivedConnectionPattern)
 );
 
 impl_strong_type!(

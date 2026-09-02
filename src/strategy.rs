@@ -1,13 +1,18 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
-#[derive(Default, Clone, Debug)]
+use rkyv::{Archive, Deserialize, Serialize};
+use tfserver::structures::s_type::{StrongType, StructureType};
+use crate::util::ob_s_type::ObSType;
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, Archive)]
 pub struct UsedPacketSize{
     pub size: usize,
     pub repeat_times: usize,
 
 }
-#[derive(Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Archive, Clone)]
 pub struct ConnectionPattern {
+    s_type: ObSType,
     ///packets sorted by size in descending order, the repeat_times represent how much packet was repeated at all time
     known_packet_sizes: HashMap<usize, usize>,
     ///packets are ordered as they coming after connect after last ChangeCipherSpec,
@@ -15,6 +20,24 @@ pub struct ConnectionPattern {
     order: Vec<UsedPacketSize>,
     order_overall_len: usize,
     bandwidth_overall_len: usize,
+}
+
+impl StrongType for ConnectionPattern {
+    fn get_s_type(&self) -> &dyn StructureType {
+        &self.s_type
+    }
+}
+
+impl Default for ConnectionPattern {
+    fn default() -> Self {
+        Self{
+            s_type: ObSType::ConnectionPatternE,
+            known_packet_sizes: HashMap::new(),
+            order: Vec::new(),
+            order_overall_len: 0,
+            bandwidth_overall_len: 0,
+        }
+    }
 }
 
 impl ConnectionPattern {

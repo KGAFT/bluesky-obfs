@@ -16,6 +16,7 @@ use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
 use tfserver::structures::temp_transport::TempTransport;
 use tfserver::structures::transport::{AsyncReadWrite, Transport};
+use tokio::time::sleep;
 use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
@@ -65,7 +66,7 @@ impl Clone for FakeCodec {
             cfg: self.cfg.clone(),
             session_keys: None,
             base_tls_header: None,
-            tls_codec: self.tls_codec.clone(),
+            tls_codec: TlsCodec::new(),
         }
     }
 }
@@ -158,11 +159,13 @@ impl FakeCodec {
         let (shared, is_server) = match self.cfg.credentials {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
+                sleep(Duration::from_secs(2)).await;
+
                 (self.handshake_from_server(stream).await, true)
             }
             CredentialsSide::Client(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Client");
-                (self.handshake_from_client(stream).await, false)
+                    (self.handshake_from_client(stream).await, false)
             }
         };
         if let Some((shared, base_tls_header)) = shared {

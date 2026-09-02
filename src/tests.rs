@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use futures_util::StreamExt;
 use tfserver::async_trait::async_trait;
+use tfserver::structures::s_type;
 use tls_parser::TlsRecordType;
+use tokio::fs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, broadcast};
 use tokio::time::sleep;
@@ -187,8 +189,36 @@ impl ClientCredentialProvider for TestClientCredProvider{
     }
 }
 
+async fn try_read_connection_pattern() -> Option<(ConnectionPattern, ConnectionPattern)> {
+
+    let cli_pat_bytes = fs::read("cli_pattern.bin").await.ok()?;
+    let serv_pat_bytes = fs::read("serv_pattern.bin").await.ok()?;
+
+    if let Ok(client_pat) = s_type::from_slice(cli_pat_bytes.as_slice()) {
+        if let Ok(server_pat) = s_type::from_slice(serv_pat_bytes.as_slice()) {
+            return Some((client_pat, server_pat));
+        }
+    }
+    None
+}
+
+async fn save_patterns(patterns: &(ConnectionPattern, ConnectionPattern)) -> Option<()>{
+    let cli_bytes = s_type::to_bytes(&patterns.0)?;
+    let serv_bytes = s_type::to_bytes(&patterns.1)?;
+    fs::write("cli_pattern.bin", cli_bytes).await.ok()?;
+    fs::write("serv_pattern.bin", serv_bytes).await.ok()?;
+    Some(())
+}
+
+
 pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
-    let mut connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+    let mut connection_pattern = if let Some(pattern) = try_read_connection_pattern().await{
+        pattern
+    } else {
+        let pat = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+        save_patterns(&pat).await;
+        pat
+    };
     let mut rate_limiter_cfg = FakeCodecRateLimiterCfg::default();
     rate_limiter_cfg.client_pattern = connection_pattern.0;
 
@@ -242,9 +272,13 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
 }
 
 pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
-    let connection_pattern = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
-
-
+    let mut connection_pattern = if let Some(pattern) = try_read_connection_pattern().await{
+        pattern
+    } else {
+        let pat = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+        save_patterns(&pat).await;
+        pat
+    };
 
     let mut cfg_client = FakeCodecCfg{
         pattern: connection_pattern.0,
