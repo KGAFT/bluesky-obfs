@@ -159,6 +159,7 @@ impl FakeCodec {
         let (shared, is_server) = match self.cfg.credentials {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
+                //@TODO remove
                 sleep(Duration::from_secs(2)).await;
 
                 (self.handshake_from_server(stream).await, true)
