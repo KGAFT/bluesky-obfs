@@ -237,6 +237,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: Some(rate_limiter_cfg),
+        max_adjusted_padding_derivation_percent: 0.5f64,
     };
 
     let listener = TcpListener::bind("127.0.0.1:9984").await.unwrap();
@@ -295,6 +296,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: None,
+        max_adjusted_padding_derivation_percent: 0.5f64,
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);

@@ -1,23 +1,27 @@
-use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider};
+use crate::codec::fake_codec::{
+    ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider,
+};
+use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter, FakeCodecRateLimiterCfg};
 use crate::codec::spake2_injector::Spake2State::FirstPartNegotiated;
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN};
 use crate::strategy::ConnectionPattern;
 use crate::util::crypt_util::{aes256_gcm_decrypt, aes256_gcm_encrypt};
-use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, ServerHelloStruct};
+use crate::util::ob_s_type::{
+    ClientBeginStruct, ClientHelloStruct, PacketContainer, ServerHelloStruct,
+};
 use rand::{Rng, random_range};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::mem;
 use std::sync::Arc;
 use tfserver::structures::s_type;
 use tokio_util::bytes::Bytes;
-use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter, FakeCodecRateLimiterCfg};
 
-pub enum FirstPartSpake2{
+pub enum FirstPartSpake2 {
     Client(Option<Spake2<Ed25519Group>>),
     Server(ClientHelloStruct),
 }
 
-pub enum Spake2State{
+pub enum Spake2State {
     Begin,
     FirstPartNegotiated(FirstPartSpake2),
     SecondPartNegotiated(Vec<u8>),
@@ -34,48 +38,47 @@ pub struct Spake2Injector {
 
 impl Spake2Injector {
     pub fn new(mut cfg: FakeCodecCfg) -> Self {
-        let target_packet = match cfg.credentials{
-            CredentialsSide::Server(_) => {random_range(1usize..3)}
-            CredentialsSide::Client(_) => {Self::select_packet_from_pattern(&cfg.pattern, 1, 1)}
+        let target_packet = match cfg.credentials {
+            CredentialsSide::Server(_) => random_range(1usize..3),
+            CredentialsSide::Client(_) => Self::select_packet_from_pattern(&cfg.pattern, 1, 1),
         };
         eprintln!("Spake2Injector: target_packet={}", target_packet);
-        let rate_limiter = if let Some(limiter_cfg) = cfg.rate_limiter.take(){
+        let rate_limiter = if let Some(limiter_cfg) = cfg.rate_limiter.take() {
             Some(FakeCodecRateLimiter::new(limiter_cfg))
         } else {
             None
         };
-        Self{state: Spake2State::Begin, cfg, tx_counter: 0, rx_counter: 0, target_packet, rate_limiter}
+        Self {
+            state: Spake2State::Begin,
+            cfg,
+            tx_counter: 0,
+            rx_counter: 0,
+            target_packet,
+            rate_limiter,
+        }
     }
 
     pub async fn on_remote_packet(&mut self, data: Bytes) -> Option<Bytes> {
-
-        match &self.cfg.credentials{
-            CredentialsSide::Server(_) => {self.on_server_side_remote_packet(data).await},
-            CredentialsSide::Client(_) => {
-                self.on_client_side_remote_packet(data).await
-            }
+        match &self.cfg.credentials {
+            CredentialsSide::Server(_) => self.on_server_side_remote_packet(data).await,
+            CredentialsSide::Client(_) => self.on_client_side_remote_packet(data).await,
         }
     }
 
     pub async fn on_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
-
-
-        match &self.cfg.credentials{
-            CredentialsSide::Server(_) => {self.on_server_side_local_packet(data).await},
-            CredentialsSide::Client(_) => {
-                self.on_client_side_local_packet(data).await
-            }
+        match &self.cfg.credentials {
+            CredentialsSide::Server(_) => self.on_server_side_local_packet(data).await,
+            CredentialsSide::Client(_) => self.on_client_side_local_packet(data).await,
         }
     }
 
-
-
     async fn on_server_side_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
-
         let is_app = is_application_data(&data);
         match &self.state {
             Spake2State::Begin => {
-                if is_app { self.tx_counter += 1; }
+                if is_app {
+                    self.tx_counter += 1;
+                }
                 Some(data)
             }
             Spake2State::FirstPartNegotiated(fp) => {
@@ -84,19 +87,24 @@ impl Spake2Injector {
                     match fp {
                         FirstPartSpake2::Client(_) => None,
                         FirstPartSpake2::Server(hello) => {
-                            let res = Self::inject_server_message(&self.cfg, hello, data.to_vec()).await?;
+                            let res = Self::inject_server_message(&self.cfg, hello, data.to_vec())
+                                .await?;
                             let finished = res.1.finish(hello.auth_data.as_slice()).ok()?;
                             self.state = Spake2State::SecondPartNegotiated(finished);
                             Some(Bytes::from(res.0))
                         }
                     }
                 } else {
-                    if is_app { self.tx_counter += 1; }
+                    if is_app {
+                        self.tx_counter += 1;
+                    }
                     Some(data)
                 }
             }
             Spake2State::SecondPartNegotiated(_) => {
-                if is_app { self.tx_counter += 1; }
+                if is_app {
+                    self.tx_counter += 1;
+                }
                 Some(data)
             }
         }
@@ -107,17 +115,21 @@ impl Spake2Injector {
 
         if is_app && let Some(limiter) = self.rate_limiter.as_mut() {
             limiter.register_client_packet(data.as_ref());
-            if !limiter.check_if_valid(){
+            if !limiter.check_if_valid() {
                 return None;
             }
         }
-
 
         match &self.state {
             Spake2State::Begin => {
                 if is_app {
                     self.rx_counter += 1;
-                    if let Some(mut hello) = Self::probe_for_client_hello_struct(&self.cfg, &data.as_ref()[TLS_HEADER_LEN..]).await {
+                    if let Some(mut hello) = Self::probe_for_client_hello_struct(
+                        &self.cfg,
+                        &data.as_ref()[TLS_HEADER_LEN..],
+                    )
+                    .await
+                    {
                         let data = mem::replace(&mut hello.original_packet, vec![]);
                         self.state = FirstPartNegotiated(FirstPartSpake2::Server(hello));
                         self.tx_counter = 0;
@@ -127,13 +139,17 @@ impl Spake2Injector {
                 Some(data)
             }
             Spake2State::FirstPartNegotiated(_fp) => {
-                if is_app { self.rx_counter += 1; }
+                if is_app {
+                    self.rx_counter += 1;
+                }
                 Some(data)
             }
             Spake2State::SecondPartNegotiated(_) => {
                 if is_app {
                     self.rx_counter += 1;
-                    if Self::probe_for_client_begin(&self.cfg, &data.as_ref()[TLS_HEADER_LEN..]).await {
+                    if Self::probe_for_client_begin(&self.cfg, &data.as_ref()[TLS_HEADER_LEN..])
+                        .await
+                    {
                         return None;
                     }
                 }
@@ -149,19 +165,26 @@ impl Spake2Injector {
                 if is_app && self.tx_counter == self.target_packet {
                     self.tx_counter += 1;
                     let res = Self::inject_client_message(&self.cfg, data.to_vec()).await?;
-                    self.state = Spake2State::FirstPartNegotiated(FirstPartSpake2::Client(Some(res.1)));
+                    self.state =
+                        Spake2State::FirstPartNegotiated(FirstPartSpake2::Client(Some(res.1)));
                     Some(Bytes::from(res.0))
                 } else {
-                    if is_app { self.tx_counter += 1; }
+                    if is_app {
+                        self.tx_counter += 1;
+                    }
                     Some(data)
                 }
             }
             Spake2State::FirstPartNegotiated(_spake) => {
-                if is_app { self.tx_counter += 1; }
+                if is_app {
+                    self.tx_counter += 1;
+                }
                 Some(data)
             }
             Spake2State::SecondPartNegotiated(_shared) => {
-                if is_app { self.tx_counter += 1; }
+                if is_app {
+                    self.tx_counter += 1;
+                }
                 Some(data)
             }
         }
@@ -171,16 +194,24 @@ impl Spake2Injector {
         let is_app = is_application_data(&data);
         match &mut self.state {
             Spake2State::Begin => {
-                if is_app { self.rx_counter += 1; }
+                if is_app {
+                    self.rx_counter += 1;
+                }
                 Some(data)
             }
             Spake2State::FirstPartNegotiated(spake) => {
                 if is_app {
                     self.rx_counter += 1;
-                    if let Some(hello) = Self::probe_for_server_hello_struct(&self.cfg, &data.as_ref()[TLS_HEADER_LEN..]).await {
+                    if let Some(hello) = Self::probe_for_server_hello_struct(
+                        &self.cfg,
+                        &data.as_ref()[TLS_HEADER_LEN..],
+                    )
+                    .await
+                    {
                         return match spake {
                             FirstPartSpake2::Client(spake) => {
-                                let result = spake.take()?.finish(hello.auth_data.as_slice()).ok()?;
+                                let result =
+                                    spake.take()?.finish(hello.auth_data.as_slice()).ok()?;
                                 self.state = Spake2State::SecondPartNegotiated(result);
                                 Some(Bytes::from(hello.original_packet))
                             }
@@ -191,12 +222,13 @@ impl Spake2Injector {
                 Some(data)
             }
             Spake2State::SecondPartNegotiated(_) => {
-                if is_app { self.rx_counter += 1; }
+                if is_app {
+                    self.rx_counter += 1;
+                }
                 Some(data)
             }
         }
     }
-
 
     async fn inject_client_message(
         cfg: &FakeCodecCfg,
@@ -204,11 +236,12 @@ impl Spake2Injector {
     ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
         eprintln!("[FakeCodec DEBUG] inject_client_message: Starting");
         let mut tls_header = (&original_packet[..TLS_HEADER_LEN]).to_vec();
-
-        let mut client_message =
-            ClientHelloStruct::new_with_random_padding(cfg.message_padding_size.clone());
+        let mut client_message = ClientHelloStruct::new();
         client_message.original_packet = original_packet;
-        eprintln!("[FakeCodec DEBUG] inject_client_message: original packet: {:?}", client_message.original_packet);
+        eprintln!(
+            "[FakeCodec DEBUG] inject_client_message: original packet: {:?}",
+            client_message.original_packet
+        );
         let cred_provider = match cfg.credentials.clone() {
             CredentialsSide::Server(_) => {
                 eprintln!(
@@ -258,11 +291,28 @@ impl Spake2Injector {
             }
         };
 
+        let container = PacketContainer::wrap_existing_data(
+            data,
+            &cfg.pattern,
+            cfg.max_adjusted_padding_derivation_percent,
+            cfg.message_padding_size.clone(),
+        );
+
+        let data = match s_type::to_bytes(&container) {
+            Some(d) => d.to_vec(),
+            None => {
+                eprintln!(
+                    "[FakeCodec DEBUG] inject_client_message: Failed to serialize client message"
+                );
+                return None;
+            }
+        };
+
         let mut msg = match Self::encrypt_message_with_pub_key(
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(m) => m,
             None => {
@@ -301,8 +351,7 @@ impl Spake2Injector {
         );
         let mut tls_header = (&original_packet[..TLS_HEADER_LEN]).to_vec();
 
-        let mut server_msg =
-            ServerHelloStruct::new_with_random_padding(cfg.message_padding_size.clone());
+        let mut server_msg = ServerHelloStruct::new();
         server_msg.original_packet = original_packet;
 
         let cred_provider = match cfg.credentials.clone() {
@@ -320,7 +369,7 @@ impl Spake2Injector {
             cfg.server_id.as_slice(),
             client_hello.login.clone(),
         )
-            .await
+        .await
         {
             Some(sa) => sa,
             None => {
@@ -343,11 +392,28 @@ impl Spake2Injector {
             }
         };
 
+        let container = PacketContainer::wrap_existing_data(
+            data,
+            &cfg.pattern,
+            cfg.max_adjusted_padding_derivation_percent,
+            cfg.message_padding_size.clone(),
+        );
+
+        let data = match s_type::to_bytes(&container) {
+            Some(d) => d.to_vec(),
+            None => {
+                eprintln!(
+                    "[FakeCodec DEBUG] inject_client_message: Failed to serialize client message"
+                );
+                return None;
+            }
+        };
+
         let mut msg = match Self::encrypt_message_with_pub_key(
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(m) => m,
             None => {
@@ -375,14 +441,36 @@ impl Spake2Injector {
         Some((tls_header, server_auth.1))
     }
 
-    pub(crate) async fn make_client_begin_msg(&self, mut base_tls_header: Vec<u8>) -> Option<Vec<u8>> {
-        let msg = ClientBeginStruct::new_with_random_padding(self.cfg.message_padding_size.clone());
+    pub(crate) async fn make_client_begin_msg(
+        &self,
+        cfg: &FakeCodecCfg,
+        mut base_tls_header: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        let msg = ClientBeginStruct::new();
         let data = s_type::to_bytes(&msg).unwrap().to_vec();
+
+        let container = PacketContainer::wrap_existing_data(
+            data,
+            &cfg.pattern,
+            cfg.max_adjusted_padding_derivation_percent,
+            cfg.message_padding_size.clone(),
+        );
+
+        let data = match s_type::to_bytes(&container) {
+            Some(d) => d.to_vec(),
+            None => {
+                eprintln!(
+                    "[FakeCodec DEBUG] inject_client_message: Failed to serialize client message"
+                );
+                return None;
+            }
+        };
+
         let mut data = match Self::encrypt_message_with_pub_key(
             data.as_slice(),
             self.cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(d) => d,
             None => {
@@ -413,16 +501,18 @@ impl Spake2Injector {
         if let Some(msg) =
             Self::decrypt_message_with_pub_key(packet, cfg.public_password.as_slice()).await
         {
-            if let Ok(open) = s_type::access::<ClientBeginStruct>(msg.as_slice()) {
-                if ClientBeginStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Success");
-                    let _ = open;
-                    return true;
+            if let Ok(base) = s_type::access::<PacketContainer>(msg.as_slice()) {
+                if let Ok(open) = s_type::access::<ClientBeginStruct>(base.packet.as_slice()) {
+                    if ClientBeginStruct::validate_arc(open) {
+                        eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Success");
+                        let _ = open;
+                        return true;
+                    } else {
+                        eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Validation failed");
+                    }
                 } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Validation failed");
+                    eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Access failed");
                 }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Access failed");
             }
         } else {
             eprintln!("[FakeCodec DEBUG] probe_for_client_begin: Decryption failed");
@@ -441,16 +531,20 @@ impl Spake2Injector {
         if let Some(msg) =
             Self::decrypt_message_with_pub_key(&packet, cfg.public_password.as_slice()).await
         {
-            if let Ok(open) = s_type::access::<ServerHelloStruct>(msg.as_slice()) {
-                if ServerHelloStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Success");
-                    let _ = open;
-                    return Some(s_type::from_slice(msg.as_slice()).unwrap());
+            if let Ok(base) = s_type::access::<PacketContainer>(msg.as_slice()) {
+                if let Ok(open) = s_type::access::<ServerHelloStruct>(base.packet.as_slice()) {
+                    if ServerHelloStruct::validate_arc(open) {
+                        eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Success");
+                        let _ = open;
+                        return Some(s_type::from_slice(base.packet.as_slice()).unwrap());
+                    } else {
+                        eprintln!(
+                            "[FakeCodec DEBUG] probe_for_server_hello_struct: Validation failed"
+                        );
+                    }
                 } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Validation failed");
+                    eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Access failed");
                 }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Access failed");
             }
         } else {
             eprintln!("[FakeCodec DEBUG] probe_for_server_hello_struct: Decryption failed");
@@ -469,16 +563,20 @@ impl Spake2Injector {
         if let Some(msg) =
             Self::decrypt_message_with_pub_key(data, cfg.public_password.as_slice()).await
         {
-            if let Ok(open) = s_type::access::<ClientHelloStruct>(msg.as_slice()) {
-                if ClientHelloStruct::validate_arc(open) {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Success");
-                    let _ = open;
-                    return Some(s_type::from_slice(msg.as_slice()).unwrap());
+            if let Ok(base) = s_type::access::<PacketContainer>(msg.as_slice()) {
+                if let Ok(open) = s_type::access::<ClientHelloStruct>(base.packet.as_slice()) {
+                    if ClientHelloStruct::validate_arc(open) {
+                        eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Success");
+                        let _ = open;
+                        return Some(s_type::from_slice(base.packet.as_slice()).unwrap());
+                    } else {
+                        eprintln!(
+                            "[FakeCodec DEBUG] probe_for_client_hello_struct: Validation failed"
+                        );
+                    }
                 } else {
-                    eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Validation failed");
+                    eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Access failed");
                 }
-            } else {
-                eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Access failed");
             }
         } else {
             eprintln!("[FakeCodec DEBUG] probe_for_client_hello_struct: Decryption failed");
@@ -557,7 +655,11 @@ impl Spake2Injector {
         res.ok()
     }
 
-    fn select_packet_from_pattern(pattern: &ConnectionPattern, start_index: usize, end_offset: usize) -> usize {
+    fn select_packet_from_pattern(
+        pattern: &ConnectionPattern,
+        start_index: usize,
+        end_offset: usize,
+    ) -> usize {
         let ordered_packets = pattern.order();
         if ordered_packets.is_empty() {
             eprintln!("[FakeCodec DEBUG] select_packet_from_pattern: pattern.order() is empty!");
@@ -568,7 +670,9 @@ impl Spake2Injector {
         let end = pattern.overall_idx_to_order_idx_backwards(end_offset);
 
         if start >= end {
-            eprintln!("[FakeCodec DEBUG] select_packet_from_pattern: Invalid range ({start}..{end}), falling back");
+            eprintln!(
+                "[FakeCodec DEBUG] select_packet_from_pattern: Invalid range ({start}..{end}), falling back"
+            );
             return start_index + 1;
         }
 
@@ -578,8 +682,9 @@ impl Spake2Injector {
             let order_idx = rng.random_range(start..end);
 
             if ordered_packets[order_idx].repeat_times == 1 || attempts <= 1 {
-
-                return pattern.order_idx_to_overall_idx(order_idx).max(start_index + 1);
+                return pattern
+                    .order_idx_to_overall_idx(order_idx)
+                    .max(start_index + 1);
             }
             attempts -= 1;
         }

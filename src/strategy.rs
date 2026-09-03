@@ -1,5 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::ops::Range;
+use rand::Rng;
 use rkyv::{Archive, Deserialize, Serialize};
 use tfserver::structures::s_type::{StrongType, StructureType};
 use crate::util::ob_s_type::ObSType;
@@ -18,6 +20,7 @@ pub struct ConnectionPattern {
     ///packets are ordered as they coming after connect after last ChangeCipherSpec,
     /// maybe needed when needed to pick in which place inject target packet
     order: Vec<UsedPacketSize>,
+    sorted_packet_sizes: Vec<usize>,
     order_overall_len: usize,
     bandwidth_overall_len: usize,
 }
@@ -34,6 +37,7 @@ impl Default for ConnectionPattern {
             s_type: ObSType::ConnectionPatternE,
             known_packet_sizes: HashMap::new(),
             order: Vec::new(),
+            sorted_packet_sizes: vec![],
             order_overall_len: 0,
             bandwidth_overall_len: 0,
         }
@@ -71,7 +75,11 @@ impl ConnectionPattern {
             self.known_packet_sizes.insert(packet.size, packet.repeat_times);
         }
     }
+
     pub fn finalize(&mut self){
+        self.sorted_packet_sizes.clear();
+        self.sorted_packet_sizes.extend(self.known_packet_sizes.keys());
+        self.sorted_packet_sizes.sort_unstable();
     }
 
     pub fn overall_idx_to_order_idx(&self, idx: usize) -> usize {
@@ -104,10 +112,35 @@ impl ConnectionPattern {
     pub fn check_if_size_exists(&self, size: usize) ->bool{
         self.known_packet_sizes.contains_key(&size)
     }
-    
+
+    pub fn select_packet_size(&self, size: usize, max_derivation_percent: f64) -> Option<usize> {
+        for packet in self.sorted_packet_sizes.iter() {
+            if *packet >= size{
+                if *packet as f64/size as f64  - 1f64 < max_derivation_percent{
+                    return Some(*packet);
+                } else {
+                    break;
+                }
+            }
+        }
+        None
+    }
+
+    pub fn select_packet_size_with_random_padding_fallback(&self, size: usize, max_derivation_percent: f64, random_padding: Range<usize>) -> usize {
+        if let Some(size) = self.select_packet_size(size, max_derivation_percent) {
+            size
+        } else {
+            let mut rng = rand::rng();
+            rng.random_range(random_padding.clone()) + size
+        }
+    }
+
     pub fn clear(&mut self) {
         self.order.clear();
         self.known_packet_sizes.clear();
+        self.sorted_packet_sizes.clear();
+        self.order_overall_len = 0;
+        self.bandwidth_overall_len = 0;
     }
 
     pub fn order(&self) -> &Vec<UsedPacketSize> {

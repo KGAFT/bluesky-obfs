@@ -153,4 +153,17 @@ impl SessionKeys {
 
         Some(())
     }
+
+    pub const fn seal_overhead() -> usize {
+        COUNTER_LEN + TAG_LEN
+    }
+
+
+    pub const fn sealed_len(plaintext_len: usize) -> usize {
+        plaintext_len + Self::seal_overhead()
+    }
+
+    pub const fn plaintext_len(sealed_len: usize) -> Option<usize> {
+        sealed_len.checked_sub(Self::seal_overhead())
+    }
 }

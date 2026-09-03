@@ -6,21 +6,23 @@ use crate::strategy::ConnectionPattern;
 use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
 use crate::util::session_keys::SessionKeys;
 
+use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
+use crate::util::ob_s_type::PacketContainerBytes;
 use futures_util::{Sink, SinkExt, StreamExt};
+use std::io;
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
-use std::io;
 use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
+use tfserver::structures::s_type;
 use tfserver::structures::temp_transport::TempTransport;
 use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio::time::sleep;
-use tokio_util::bytes::{Buf, Bytes, BytesMut};
+use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
-use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -34,7 +36,8 @@ pub struct FakeCodecCfg {
     pub target_browser: Emulation,
     pub message_padding_size: Range<usize>,
     pub server_id: Vec<u8>,
-    pub rate_limiter: Option<FakeCodecRateLimiterCfg>
+    pub rate_limiter: Option<FakeCodecRateLimiterCfg>,
+    pub max_adjusted_padding_derivation_percent: f64,
 }
 
 #[derive(Clone)]
@@ -74,50 +77,65 @@ impl Clone for FakeCodec {
 impl Decoder for FakeCodec {
     type Item = BytesMut;
     type Error = io::Error;
-
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let mut frame = match self.tls_codec.decode(src)? {
             Some(f) => f,
             None => return Ok(None),
         };
         frame.advance(TLS_HEADER_LEN);
-        if let Some(keys) = &self.session_keys {
-            if keys.open_in_place(&mut frame).is_none() {
-                eprintln!(
-                    "[FakeCodec DEBUG] decode: decryption failed (open_in_place returned None)"
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "decryption failed",
-                ));
-            }
-        } else {
-            eprintln!("[FakeCodec DEBUG] decode: session_keys is None, cannot decrypt");
+
+        let Some(keys) = &self.session_keys else {
             return Err(io::Error::new(io::ErrorKind::Other, "decryption failed"));
+        };
+        if keys.open_in_place(&mut frame).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decryption failed",
+            ));
         }
+
+        if frame.len() < 2 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "short frame"));
+        }
+        let padding_len = frame.get_u16() as usize; // advances 2 bytes, no copy
+        if frame.len() < padding_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad padding len",
+            ));
+        }
+        frame.advance(padding_len); // pure pointer bump, zero-copy
+
         Ok(Some(frame))
     }
 }
 
 impl Encoder<Bytes> for FakeCodec {
     type Error = io::Error;
-
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let Some(keys) = &self.session_keys else {
             eprintln!("[FakeCodec DEBUG] encode: session_keys is None, cannot encrypt");
             return Err(io::Error::new(io::ErrorKind::Other, "encryption failed"));
         };
 
-        let mut buf = BytesMut::from(item);
-        if keys.seal_in_place(&mut buf).is_none() {
-            eprintln!("[FakeCodec DEBUG] encode: encryption failed (seal_in_place returned None)");
-            return Err(io::Error::new(io::ErrorKind::Other, "encryption failed"));
-        }
+        let padding_len = self
+            .cfg
+            .pattern
+            .select_packet_size_with_random_padding_fallback(
+                item.len(),
+                self.cfg.max_adjusted_padding_derivation_percent,
+                self.cfg.message_padding_size.clone(),
+            )-item.len();
+        debug_assert!(padding_len <= u16::MAX as usize);
 
-        if buf.len() > TLS_MAX_RECORD_LEN {
+        // plaintext body = [padding_len: u16][padding bytes][payload]
+        let body_len = 2 + padding_len + item.len();
+        let sealed_len = SessionKeys::sealed_len(body_len);
+
+        if TLS_HEADER_LEN + sealed_len > TLS_MAX_RECORD_LEN {
             eprintln!(
                 "[FakeCodec DEBUG] encode: sealed record {} exceeds max {}",
-                buf.len(),
+                TLS_HEADER_LEN + sealed_len,
                 TLS_MAX_RECORD_LEN
             );
             return Err(io::Error::new(
@@ -127,12 +145,32 @@ impl Encoder<Bytes> for FakeCodec {
         }
 
         let mut header = self.base_tls_header.as_ref().unwrap().clone();
-        let len_bytes = (buf.len() as u16).to_be_bytes();
+        let len_bytes = (sealed_len as u16).to_be_bytes();
         header[3] = len_bytes[0];
         header[4] = len_bytes[1];
 
+        dst.reserve(TLS_HEADER_LEN + sealed_len);
         dst.extend_from_slice(&header);
-        dst.extend_from_slice(&buf);
+        let body_start = dst.len();
+
+        dst.put_u16(padding_len as u16);
+        let pad_start = dst.len();
+        dst.resize(pad_start + padding_len, 0);
+        rand::fill(&mut dst[pad_start..pad_start + padding_len]);
+        dst.extend_from_slice(&item);
+
+        debug_assert_eq!(dst.len() - body_start, body_len);
+
+        let mut body = dst.split_off(body_start);
+        if keys.seal_in_place(&mut body).is_none() {
+            eprintln!("[FakeCodec DEBUG] encode: encryption failed (seal_in_place returned None)");
+            dst.unsplit(body);
+            dst.truncate(dst.len().saturating_sub(sealed_len + TLS_HEADER_LEN));
+            return Err(io::Error::new(io::ErrorKind::Other, "encryption failed"));
+        }
+        debug_assert_eq!(body.len(), sealed_len);
+        dst.unsplit(body);
+
         Ok(())
     }
 }
@@ -166,7 +204,7 @@ impl FakeCodec {
             }
             CredentialsSide::Client(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Client");
-                    (self.handshake_from_client(stream).await, false)
+                (self.handshake_from_client(stream).await, false)
             }
         };
         if let Some((shared, base_tls_header)) = shared {
@@ -219,7 +257,7 @@ impl FakeCodec {
                                 eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
                                 vec![0; TLS_HEADER_LEN]
                             });
-                            if let Some(msg) = injector.make_client_begin_msg(header).await {
+                            if let Some(msg) = injector.make_client_begin_msg(&self.cfg, header).await {
                                 eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
                                 if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
                                     eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
