@@ -10,6 +10,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 use futures_util::StreamExt;
+use rand::random_range;
 use tfserver::async_trait::async_trait;
 use tfserver::structures::s_type;
 use tls_parser::TlsRecordType;
@@ -219,9 +220,10 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         save_patterns(&pat).await;
         pat
     };
+
     let mut rate_limiter_cfg = FakeCodecRateLimiterCfg::default();
     rate_limiter_cfg.client_pattern = connection_pattern.0;
-
+    rate_limiter_cfg.bandwidth_max_derivation_percent = 0.8;
     let mut cfg_serv = FakeCodecCfg{
         pattern: connection_pattern.1,
         public_password: pbk_key,
@@ -237,38 +239,49 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: Some(rate_limiter_cfg),
-        max_adjusted_padding_derivation_percent: 0.5f64,
+        max_adjusted_padding_derivation_percent: 0.8f64,
     };
 
-    let listener = TcpListener::bind("127.0.0.1:9984").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
 
         let mut cli = listener.accept().await.unwrap();
     cli.0.set_nodelay(true).unwrap();
         let mut codec = FakeCodec::new(cfg_serv);
         if codec.setup_stream(&mut cli.0).await{
             let mut client = Framed::new(cli.0, codec);
-
+            let mut end_point: Option<(ProxyEndpoint, SenderSideChannel)> = None;
             loop {
-                let msg = receive_message(&mut client).await;
-                if let Ok(data) = msg{
-                    if let Some(mut data) = data{
-                        let msg = String::from_utf8_lossy(data.as_mut());
-                        println!("Client received: {:?}", msg);
+                tokio::select! {
+                    data = receive_msg_from_endpoint(&mut end_point) => {
+                        if let Some(data) = data{
+                            send_message(&mut client, data).await;
+                        }
                     }
-                } else if let Err(need_close) = msg{
-                    if need_close{
-                        return;
+                    data = receive_message(&mut client) => {
+                        if let Ok(data) = data{
+                            if let Some(data) = data{
+                                if end_point.is_none(){
+                                    end_point = Some(ProxyEndpoint::new("distfiles.gentoo.org:443".to_string()).await.unwrap())
+                                }
+                                end_point.as_mut().unwrap().1.to_endpoint_snd.send(data.freeze()).await.unwrap();
+                            }
+                        }
                     }
                 }
-
             }
 
         } else {
             eprintln!("Setup failed");
             return;
         }
+}
 
-
+async fn receive_msg_from_endpoint(end_point: &mut Option<(ProxyEndpoint, SenderSideChannel)>) -> Option<Bytes> {
+    if let Some(end_point) = end_point {
+        end_point.1.from_endpoint_rcv.recv().await
+    } else {
+        None
+    }
 
 }
 
@@ -280,6 +293,9 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         save_patterns(&pat).await;
         pat
     };
+
+
+
 
     let mut cfg_client = FakeCodecCfg{
         pattern: connection_pattern.0,
@@ -296,23 +312,30 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: None,
-        max_adjusted_padding_derivation_percent: 0.5f64,
+        max_adjusted_padding_derivation_percent: 0.8f64,
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
-    let mut client = TcpStream::connect("127.0.0.1:9984").await.unwrap();
+    let mut client = TcpStream::connect("127.0.01:443").await.unwrap();
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);
-        let mut counter = 0;
+        let mut proxy_interface = ProxyInterface::new(9975).await;
         loop {
-            let res = send_message(&mut client, Bytes::from("hello msg!".as_bytes())).await.unwrap();
-            counter += 1;
-            if counter == 10{
-                let _ = client;
-                break
+            tokio::select! {
+                data = proxy_interface.1.from_endpoint_rcv.recv() => {
+                    if let Some(data) = data{
+                        send_message(&mut client, data).await;
+                    }
+                }
+                data = receive_message(&mut client) => {
+                    if let Ok(data) = data{
+                        if let Some(data) = data{
+                            proxy_interface.1.to_endpoint_snd.send(data.freeze()).await.unwrap();
+                        }
+                    }
+                }
             }
-            sleep(Duration::from_secs(5)).await;
         }
     } else {
         eprintln!("Setup failed");

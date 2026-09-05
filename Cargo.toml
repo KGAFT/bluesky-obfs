@@ -16,7 +16,8 @@ path = "src/lib.rs"
 name = "bsobfs"
 
 [dependencies]
-the-fourth-server = "0.4"
+the-fourth-server = {path = "../the-fourth-server"}
+
 wreq = {version = "6.0.0-rc.31", features = ["tokio-rt"]}
 wreq-util = {version = "3.0.0-rc.14", features = ["tokio-rt"]}
 tokio = {version = "1", features = ["full"]}

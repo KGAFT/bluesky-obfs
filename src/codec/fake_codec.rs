@@ -61,6 +61,7 @@ pub struct FakeCodec {
     session_keys: Option<SessionKeys>,
     base_tls_header: Option<Vec<u8>>,
     tls_codec: TlsCodec,
+    leftover: BytesMut,
 }
 
 impl Clone for FakeCodec {
@@ -70,6 +71,7 @@ impl Clone for FakeCodec {
             session_keys: None,
             base_tls_header: None,
             tls_codec: TlsCodec::new(),
+            leftover: BytesMut::new(),
         }
     }
 }
@@ -78,6 +80,12 @@ impl Decoder for FakeCodec {
     type Item = BytesMut;
     type Error = io::Error;
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if !self.leftover.is_empty() {
+            let mut combined = std::mem::take(&mut self.leftover);
+            combined.unsplit(src.split());
+            *src = combined;
+        }
+
         let mut frame = match self.tls_codec.decode(src)? {
             Some(f) => f,
             None => return Ok(None),
@@ -88,23 +96,17 @@ impl Decoder for FakeCodec {
             return Err(io::Error::new(io::ErrorKind::Other, "decryption failed"));
         };
         if keys.open_in_place(&mut frame).is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "decryption failed",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "decryption failed"));
         }
 
         if frame.len() < 2 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "short frame"));
         }
-        let padding_len = frame.get_u16() as usize; // advances 2 bytes, no copy
+        let padding_len = frame.get_u16() as usize;
         if frame.len() < padding_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad padding len",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad padding len"));
         }
-        frame.advance(padding_len); // pure pointer bump, zero-copy
+        frame.advance(padding_len);
 
         Ok(Some(frame))
     }
@@ -189,6 +191,7 @@ impl FakeCodec {
             session_keys: None,
             base_tls_header: None,
             tls_codec: TlsCodec::new(),
+            leftover: BytesMut::new(),
         }
     }
 
@@ -198,7 +201,7 @@ impl FakeCodec {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
                 //@TODO remove
-                sleep(Duration::from_secs(2)).await;
+                sleep(Duration::from_secs(5)).await;
 
                 (self.handshake_from_server(stream).await, true)
             }
@@ -224,7 +227,7 @@ impl FakeCodec {
     }
 
     async fn handshake_from_client<T: AsyncReadWrite + Send + Sync>(
-        &self,
+        &mut self,
         stream: &mut T,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         eprintln!("[FakeCodec DEBUG] handshake_from_client: Starting handshake");
@@ -245,11 +248,13 @@ impl FakeCodec {
         loop {
             tokio::select! {
                 resp = &mut req_fut, if !req_done => {
+                    drop(local_proxy);
                     req_done = true;
                     if let Err(err) = resp {
                         eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
                         return None;
                     }
+
                     eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
                     match injector.state() {
                         Spake2State::SecondPartNegotiated(_) => {
@@ -318,11 +323,12 @@ impl FakeCodec {
                 }
             }
         }
-
         let shared = match injector.state() {
             Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
             _ => None,
         };
+        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
+
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_client: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
             shared.is_some(),
@@ -332,7 +338,7 @@ impl FakeCodec {
     }
 
     async fn handshake_from_server<T: AsyncReadWrite + Send + Sync>(
-        &self,
+        &mut self,
         stream: &mut T,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         eprintln!("[FakeCodec DEBUG] handshake_from_server: Starting handshake");
@@ -354,6 +360,7 @@ impl FakeCodec {
                                     }
                                 }
                                 None => {
+                                      drop(proxy_endpoint);
                                     eprintln!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
                                     break;
                                 }
@@ -395,6 +402,7 @@ impl FakeCodec {
             Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
             _ => None,
         };
+        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
         eprintln!(
             "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
             shared.is_some(),

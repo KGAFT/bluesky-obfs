@@ -116,6 +116,7 @@ impl SessionKeys {
         let counter = u64::from_be_bytes(buf[..COUNTER_LEN].try_into().ok()?);
 
         if counter == u64::MAX {
+            eprintln!("Counter maxed!");
             return None;
         }
 
@@ -123,6 +124,7 @@ impl SessionKeys {
         let mut last = self.recv_counter.load(Ordering::Acquire);
         loop {
             if counter <= last {
+                eprintln!("Replay protection");
                 return None; // replay or reorder
             }
             match self.recv_counter.compare_exchange_weak(

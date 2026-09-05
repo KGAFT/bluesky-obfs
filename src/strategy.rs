@@ -114,6 +114,9 @@ impl ConnectionPattern {
     }
 
     pub fn select_packet_size(&self, size: usize, max_derivation_percent: f64) -> Option<usize> {
+        if size == 0{
+            return None;
+        }
         for packet in self.sorted_packet_sizes.iter() {
             if *packet >= size{
                 if *packet as f64/size as f64  - 1f64 < max_derivation_percent{
