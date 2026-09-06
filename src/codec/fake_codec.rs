@@ -257,20 +257,7 @@ impl FakeCodec {
 
                     eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
                     match injector.state() {
-                        Spake2State::SecondPartNegotiated(_) => {
-                            let header = base_tls_header.clone().unwrap_or_else(|| {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_client: WARNING: base_tls_header is None, using default zeroed header");
-                                vec![0; TLS_HEADER_LEN]
-                            });
-                            if let Some(msg) = injector.make_client_begin_msg(&self.cfg, header).await {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Sending client begin msg, len: {}", msg.len());
-                                if send_message(&mut temp_transport, Bytes::from(msg)).await.is_err() {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send client begin msg");
-                                }
-                            } else {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to make client begin msg");
-                            }
-                        }
+                        Spake2State::SecondPartNegotiated(_) => {}
                         _ => {
                             eprintln!("Failed to handshake");
                             return None;
@@ -326,15 +313,40 @@ impl FakeCodec {
         let shared = match injector.state() {
             Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
             _ => None,
-        };
-        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
+        }?;
+
+        if let Some(packet) = injector.packet_after_handshake().await{
+            send_message(&mut temp_transport, packet).await.ok()?;
+        } else {
+            return None;
+        }
+
+        let mut attempts = 0;
+        loop{
+            if let Ok(msg) = receive_message(&mut temp_transport).await {
+                if let Some(msg) = msg {
+                    if injector.probe_packet_after_handshake(msg.freeze()).await {
+                        break;
+                    }
+                }
+            }
+            if attempts > 100 {
+                return None;
+            }
+            attempts += 1;
+        }
+
+        if let Some(packet) = injector.packet_after_handshake().await{
+            send_message(&mut temp_transport, packet).await.ok()?;
+        } else {
+            return None;
+        }
 
         eprintln!(
-            "[FakeCodec DEBUG] handshake_from_client: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(),
+            "[FakeCodec DEBUG] handshake_from_client: Exiting loop, base_tls_header is_some: {}",
             base_tls_header.is_some()
         );
-        Some((shared?, base_tls_header?))
+        Some((shared, base_tls_header?))
     }
 
     async fn handshake_from_server<T: AsyncReadWrite + Send + Sync>(
@@ -398,17 +410,39 @@ impl FakeCodec {
             }
         }
 
+
         let shared = match injector.state() {
             Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
             _ => None,
-        };
-        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
+        }?;
+
+        if let Some(packet) = injector.packet_after_handshake().await {
+            send_message(&mut temp_transport, packet).await.ok()?;
+        } else {
+            return None;
+        }
+        let mut attempts = 0;
+        loop{
+            if let Ok(msg) = receive_message(&mut temp_transport).await {
+                if let Some(msg) = msg {
+                    if injector.probe_packet_after_handshake(msg.freeze()).await {
+                        break;
+                    }
+                }
+            }
+            if attempts > 10 {
+                return None;
+            }
+            attempts += 1;
+        }
+
+      //  self.leftover = std::mem::take(temp_transport.read_buffer_mut());
         eprintln!(
-            "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: {}, base_tls_header is_some: {}",
-            shared.is_some(),
+            "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: true, base_tls_header is_some: {}",
+
             base_tls_header.is_some()
         );
-        Some((shared?, base_tls_header?))
+        Some((shared, base_tls_header?))
     }
 
     fn init_wreq_instance(&self) -> Client {

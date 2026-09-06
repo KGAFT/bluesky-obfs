@@ -316,11 +316,11 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
-    let mut client = TcpStream::connect("127.0.01:443").await.unwrap();
+    let mut client = TcpStream::connect("64.7.199.41:443").await.unwrap();
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);
-        let mut proxy_interface = ProxyInterface::new(9975).await;
+        let mut proxy_interface = ProxyInterface::new(9985).await;
         loop {
             tokio::select! {
                 data = proxy_interface.1.from_endpoint_rcv.recv() => {

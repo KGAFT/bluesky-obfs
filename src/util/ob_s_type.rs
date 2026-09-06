@@ -1,5 +1,5 @@
 use crate::strategy::{ArchivedConnectionPattern, ConnectionPattern};
-use crate::util::ob_s_type::ObSType::{ClientBegin, ClientHello, PacketContainerB, PacketContainerE, ServerHello};
+use crate::util::ob_s_type::ObSType::{ClientBegin, ClientHello, PacketContainerB, PacketContainerE, ServerBegin, ServerHello};
 use crate::util::rand_util::generate_random_u8_vec;
 use num_enum::TryFromPrimitive;
 use rand::Rng;
@@ -32,7 +32,8 @@ pub enum ObSType {
     ClientBegin,
     ConnectionPatternE,
     PacketContainerE,
-    PacketContainerB
+    PacketContainerB,
+    ServerBegin,
 }
 
 impl_structure_type!(
@@ -42,7 +43,8 @@ impl_structure_type!(
     ClientBegin => (ClientBeginStruct, ArchivedClientBeginStruct),
     ConnectionPatternE => (ConnectionPattern, ArchivedConnectionPattern),
     PacketContainerE => (PacketContainer, ArchivedPacketContainer),
-    PacketContainerB => (PacketContainerBytes, ArchivedPacketContainerBytes)
+    PacketContainerB => (PacketContainerBytes, ArchivedPacketContainerBytes),
+    ServerBegin => (ServerBeginStruct, ArchivedServerBeginStruct),
 );
 
 impl_strong_type!(
@@ -50,13 +52,15 @@ impl_strong_type!(
     ServerHelloStruct => ArchivedServerHelloStruct,
     ClientBeginStruct => ArchivedClientBeginStruct,
     PacketContainer => ArchivedPacketContainer,
-    PacketContainerBytes => ArchivedPacketContainerBytes
+    PacketContainerBytes => ArchivedPacketContainerBytes,
+    ServerBeginStruct => ArchivedServerBeginStruct,
 );
 
 pub const CLIENT_VALIDATE_MSG: &str = "client hello message!";
 pub const SERVER_VALIDATE_MSG: &str = "server hello message!";
 
 pub const CLIENT_BEGIN: &str = "client begin!";
+pub const SERVER_BEGIN: &str = "server begin!";
 #[derive(Serialize, Deserialize, Debug, Archive)]
 pub struct PacketContainer {
     pub padding: Vec<u8>,
@@ -230,3 +234,25 @@ impl ClientBeginStruct {
         data.validate_msg.eq(CLIENT_BEGIN)
     }
 }
+
+#[derive(Serialize, Deserialize, Debug, Archive)]
+pub struct ServerBeginStruct {
+    pub s_type: ObSType,
+    pub validate_msg: String,
+}
+
+impl ServerBeginStruct {
+    pub fn new() -> Self {
+        Self {
+            s_type: ServerBegin,
+            validate_msg: SERVER_BEGIN.to_string(),
+        }
+    }
+    pub fn validate(&self) -> bool {
+        self.validate_msg.eq(SERVER_BEGIN)
+    }
+    pub fn validate_arc(data: &ArchivedServerBeginStruct) -> bool {
+        data.validate_msg.eq(SERVER_BEGIN)
+    }
+}
+
