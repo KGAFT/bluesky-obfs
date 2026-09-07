@@ -360,6 +360,8 @@ pub fn test_server_record_inspect(
     packet: &[u8],
 ) -> PacketAnalyzeFuture {
     Box::pin(async move {
+        eprintln!("contents: {}",  String::from_utf8_lossy(packet));
+
         let records = app_data.unwrap().lock().await.inspect_bytes(packet);
         records.iter().for_each(|record| {
             println!("record header from server: {:?}", record.header);
@@ -373,6 +375,7 @@ pub fn test_record_pattern(
     packet: &[u8],
 ) -> PacketAnalyzeFuture {
     Box::pin(async move {
+        eprintln!("contents: {}", String::from_utf8_lossy(packet));
         let app_data = app_data.unwrap();
         let mut data_lock = app_data.lock().await;
         let records = data_lock.reassembler.inspect_bytes(packet);

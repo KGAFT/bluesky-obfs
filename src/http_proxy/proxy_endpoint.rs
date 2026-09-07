@@ -5,8 +5,6 @@ use crate::util::io_util::{
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tfserver::futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -23,7 +21,7 @@ impl ProxyEndpoint {
         let connection = match timeout(Duration::from_secs(10), TcpStream::connect(destination.clone())).await {
             Ok(res) => res,
             Err(e) => {
-                eprintln!("[FakeCodec DEBUG] Connection to {} timed out after 10 seconds", destination);
+                eprintln!("[FakeCodec DEBUG] Connection to {} timed out after {}", destination, e);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "Connection timed out"));
             }
         };
@@ -88,13 +86,12 @@ impl Drop for ProxyEndpoint {
 }
 
 pub async fn endpoint_main(
-    mut connect: TcpStream,
+    connect: TcpStream,
     channel: EndPointSideChannel,
     mut stop_sig: broadcast::Receiver<()>,
 ) {
     let tx = channel.from_endpoint_snd;
     let mut rx = channel.to_endpoint_rcv;
-    let mut buf = [0u8; 16 * 1024];
     let mut connect = Framed::new(connect, TlsCodec::new());
     loop {
         tokio::select! {

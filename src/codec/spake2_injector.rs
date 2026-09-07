@@ -1,7 +1,7 @@
 use crate::codec::fake_codec::{
     ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider,
 };
-use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter, FakeCodecRateLimiterCfg};
+use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter};
 use crate::codec::spake2_injector::Spake2State::FirstPartNegotiated;
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN};
 use crate::strategy::ConnectionPattern;

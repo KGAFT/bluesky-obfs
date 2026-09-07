@@ -15,5 +15,5 @@ pub async fn main() {
     let pass = Sha256::digest("HelloPassword");
     key.copy_from_slice(pass.as_slice());
     
-    let res = test_fake_tls_codec_server(key).await;
+    let _ = test_fake_tls_codec_server(key).await;
 }

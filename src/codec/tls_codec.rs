@@ -68,7 +68,7 @@ impl Encoder<Bytes> for TlsCodec {
 
 #[async_trait]
 impl TfCodec for TlsCodec{
-    async fn initial_setup(&mut self, transport: &mut Transport) -> bool {
+    async fn initial_setup(&mut self, _: &mut Transport) -> bool {
         true
     }
 }

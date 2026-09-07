@@ -7,8 +7,6 @@ use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
 use crate::util::session_keys::SessionKeys;
 
 use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
-use crate::util::ob_s_type::PacketContainerBytes;
-use futures_util::{Sink, SinkExt, StreamExt};
 use std::io;
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -16,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
-use tfserver::structures::s_type;
 use tfserver::structures::temp_transport::TempTransport;
 use tfserver::structures::transport::{AsyncReadWrite, Transport};
 use tokio::time::sleep;
@@ -201,7 +198,7 @@ impl FakeCodec {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
                 //@TODO remove
-                sleep(Duration::from_secs(5)).await;
+                sleep(Duration::from_secs(2)).await;
 
                 (self.handshake_from_server(stream).await, true)
             }
@@ -243,13 +240,11 @@ impl FakeCodec {
             .read_timeout(Duration::from_secs(30))
             .send();
         tokio::pin!(req_fut);
-        let mut req_done = false;
 
         loop {
             tokio::select! {
-                resp = &mut req_fut, if !req_done => {
+                resp = &mut req_fut => {
                     drop(local_proxy);
-                    req_done = true;
                     if let Err(err) = resp {
                         eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
                         return None;
