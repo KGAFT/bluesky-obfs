@@ -35,7 +35,9 @@ pub struct FakeCodecCfg {
     pub server_id: Vec<u8>,
     pub rate_limiter: Option<FakeCodecRateLimiterCfg>,
     pub max_adjusted_padding_derivation_percent: f64,
-    pub allowed_delays: Vec<DelayType>
+    pub allowed_delays: Vec<DelayType>,
+    pub long_delay_secs: Range<u16>
+
 }
 
 #[derive(Clone)]
@@ -208,7 +210,9 @@ impl FakeCodec {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
                 //@TODO remove
-               // sleep(Duration::from_secs(2)).await;
+                let secs = rand::random_range(self.cfg.long_delay_secs.clone());
+
+                sleep(Duration::from_secs(secs as u64)).await;
                 DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
                 (self.handshake_from_server(stream).await, true)
             }

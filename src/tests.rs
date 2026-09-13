@@ -217,7 +217,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
     let mut connection_pattern = if let Some(pattern) = try_read_connection_pattern().await{
         pattern
     } else {
-        let pat = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+        let pat = make_tls_pattern("www.pinterest.com:443".to_string(), "https://www.pinterest.com".to_string()).await;
         save_patterns(&pat).await;
         pat
     };
@@ -229,18 +229,19 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         pattern: connection_pattern.1,
         public_password: pbk_key,
         credentials: CredentialsSide::Server(Arc::new(TestServerCredProvider{})),
-        target_sni: "https://www.google.com/".to_string(),
-        target_sni_connection_dest: "www.google.com:443".to_string() ,
+        target_sni: "https://www.pinterest.com/".to_string(),
+        target_sni_connection_dest: "www.pinterest.com:443".to_string() ,
         setup_proxy_port: 7756,
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: Some(rate_limiter_cfg),
         max_adjusted_padding_derivation_percent: 0.8f64,
-        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))]
+        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))],
+        long_delay_secs: 2..8,
     };
 
-    let listener = TcpListener::bind("0.0.0.0:8899").await.unwrap();
+    let listener = TcpListener::bind("64.111.93.111:443").await.unwrap();
 
         let mut cli = listener.accept().await.unwrap();
     cli.0.set_nodelay(true).unwrap();
@@ -287,7 +288,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
     let mut connection_pattern = if let Some(pattern) = try_read_connection_pattern().await{
         pattern
     } else {
-        let pat = make_tls_pattern("www.google.com:443".to_string(), "https://www.google.com".to_string()).await;
+        let pat = make_tls_pattern("www.pinterest.com:443".to_string(), "https://www.pinterest.com".to_string()).await;
         save_patterns(&pat).await;
         pat
     };
@@ -299,19 +300,20 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         pattern: connection_pattern.0,
         public_password: pbk_key,
         credentials: CredentialsSide::Client(Arc::new(TestClientCredProvider{})),
-        target_sni: "https://www.google.com/".to_string(),
-        target_sni_connection_dest: "www.google.com:443".to_string() ,
+        target_sni: "https://www.pinterest.com/".to_string(),
+        target_sni_connection_dest: "www.pinterest.com:443".to_string() ,
         setup_proxy_port: 7756,
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: None,
         max_adjusted_padding_derivation_percent: 0.8f64,
-        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))]
+        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))],
+        long_delay_secs: 2..8,
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
-    let mut client = TcpStream::connect("127.0.0.1:8899").await.unwrap();
+    let mut client = TcpStream::connect("64.111.93.111:443").await.unwrap();
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);
