@@ -25,6 +25,7 @@ use wreq_util::Emulation;
 use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodec, FakeCodecCfg, ServerCredentialProvider};
 use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 use crate::strategy::{ConnectionPattern, UsedPacketSize};
+use crate::util::delay_generator::DelayType;
 use crate::util::rand_util::generate_random_u8_vec;
 
 #[tokio::test]
@@ -230,19 +231,16 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         credentials: CredentialsSide::Server(Arc::new(TestServerCredProvider{})),
         target_sni: "https://www.google.com/".to_string(),
         target_sni_connection_dest: "www.google.com:443".to_string() ,
-        remote_ip: "127.0.0.1:5543".to_socket_addrs()
-            .unwrap()
-            .next()
-            .unwrap() ,
         setup_proxy_port: 7756,
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: Some(rate_limiter_cfg),
         max_adjusted_padding_derivation_percent: 0.8f64,
+        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))]
     };
 
-    let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:8899").await.unwrap();
 
         let mut cli = listener.accept().await.unwrap();
     cli.0.set_nodelay(true).unwrap();
@@ -303,20 +301,17 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         credentials: CredentialsSide::Client(Arc::new(TestClientCredProvider{})),
         target_sni: "https://www.google.com/".to_string(),
         target_sni_connection_dest: "www.google.com:443".to_string() ,
-        remote_ip: "127.0.0.1:5543".to_socket_addrs()
-            .unwrap()
-            .next()
-            .unwrap() ,
         setup_proxy_port: 7756,
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
         server_id: b"test-server".to_vec(),
         rate_limiter: None,
         max_adjusted_padding_derivation_percent: 0.8f64,
+        allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))]
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
-    let mut client = TcpStream::connect("64.7.199.41:443").await.unwrap();
+    let mut client = TcpStream::connect("127.0.0.1:8899").await.unwrap();
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);

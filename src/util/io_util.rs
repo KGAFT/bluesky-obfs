@@ -20,8 +20,8 @@ pub struct SenderSideChannel {
 }
 
 pub fn handler_channel() -> (EndPointSideChannel, SenderSideChannel) {
-    let first = mpsc::channel(128);
-    let second = mpsc::channel(128);
+    let first = mpsc::channel(32768);
+    let second = mpsc::channel(32768);
     (
         EndPointSideChannel {
             from_endpoint_snd: first.0,

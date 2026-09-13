@@ -20,6 +20,7 @@ use tokio::time::sleep;
 use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
+use crate::util::delay_generator::{DelayGenerator, DelayType};
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -28,13 +29,13 @@ pub struct FakeCodecCfg {
     pub credentials: CredentialsSide,
     pub target_sni: String,
     pub target_sni_connection_dest: String,
-    pub remote_ip: SocketAddr,
     pub setup_proxy_port: u16,
     pub target_browser: Emulation,
     pub message_padding_size: Range<usize>,
     pub server_id: Vec<u8>,
     pub rate_limiter: Option<FakeCodecRateLimiterCfg>,
     pub max_adjusted_padding_derivation_percent: f64,
+    pub allowed_delays: Vec<DelayType>
 }
 
 #[derive(Clone)]
@@ -143,13 +144,20 @@ impl Encoder<Bytes> for FakeCodec {
             ));
         }
 
-        let mut header = self.base_tls_header.as_ref().unwrap().clone();
-        let len_bytes = (sealed_len as u16).to_be_bytes();
-        header[3] = len_bytes[0];
-        header[4] = len_bytes[1];
+        let header = self.base_tls_header.as_ref().unwrap();
+        // let len_bytes = (sealed_len as u16).to_be_bytes(); // REMOVE THIS
+        // header[3] = len_bytes[0]; // REMOVE THIS
+        // header[4] = len_bytes[1]; // REMOVE THIS
 
         dst.reserve(TLS_HEADER_LEN + sealed_len);
-        dst.extend_from_slice(&header);
+        dst.extend_from_slice(header);
+
+        // Modify the length bytes directly in the destination buffer
+        let len_pos = dst.len() - TLS_HEADER_LEN + 3;
+        let len_bytes = (sealed_len as u16).to_be_bytes();
+        dst[len_pos] = len_bytes[0];
+        dst[len_pos + 1] = len_bytes[1];
+
         let body_start = dst.len();
 
         dst.put_u16(padding_len as u16);
@@ -169,6 +177,8 @@ impl Encoder<Bytes> for FakeCodec {
         }
         debug_assert_eq!(body.len(), sealed_len);
         dst.unsplit(body);
+
+        DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
 
         Ok(())
     }
@@ -198,8 +208,8 @@ impl FakeCodec {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
                 //@TODO remove
-                sleep(Duration::from_secs(2)).await;
-
+               // sleep(Duration::from_secs(2)).await;
+                DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
                 (self.handshake_from_server(stream).await, true)
             }
             CredentialsSide::Client(_) => {
@@ -270,6 +280,7 @@ impl FakeCodec {
                     }
                     match injector.on_local_packet(packet).await {
                         Some(out) => {
+                            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
                             if send_message(&mut temp_transport, out).await.is_err() {
                                 eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
                                 break;
@@ -311,6 +322,7 @@ impl FakeCodec {
         }?;
 
         if let Some(packet) = injector.packet_after_handshake().await{
+            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
@@ -332,6 +344,7 @@ impl FakeCodec {
         }
 
         if let Some(packet) = injector.packet_after_handshake().await{
+            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
@@ -391,6 +404,7 @@ impl FakeCodec {
                     }
                     match injector.on_local_packet(packet).await {
                         Some(out) => {
+                            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
                             if send_message(&mut temp_transport, out).await.is_err() {
                                 eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
                                 break;
@@ -412,6 +426,7 @@ impl FakeCodec {
         }?;
 
         if let Some(packet) = injector.packet_after_handshake().await {
+            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;

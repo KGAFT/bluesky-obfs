@@ -31,6 +31,7 @@ impl ProxyEndpoint {
         }
         eprintln!("[FakeCodec DEBUG] connected to destination: {}", destination);
         let connection = connection?;
+        connection.set_nodelay(true)?;
         let channel = handler_channel();
         let stop_sig = broadcast::channel(1);
         let connection_task = tokio::task::spawn(async move {
@@ -47,6 +48,7 @@ impl ProxyEndpoint {
 
     pub async fn new_d(destination: SocketAddr) -> io::Result<(Self, SenderSideChannel)> {
         let connection = TcpStream::connect(destination).await?;
+        connection.set_nodelay(true)?;
         let channel = handler_channel();
         let stop_sig = broadcast::channel(1);
         let connection_task = tokio::task::spawn(async move {
