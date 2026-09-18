@@ -1,0 +1,6 @@
+[build]
+rustflags = [
+    # "-C", "target-cpu=native",
+    "-C", "target-feature=+aes,+sse,+sse2,+ssse3,+sse4.1,+sse4.2",
+    "-C", "opt-level=3",
+]

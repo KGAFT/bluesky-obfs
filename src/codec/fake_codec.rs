@@ -16,7 +16,6 @@ use tfserver::async_trait::async_trait;
 use tfserver::codec::codec_trait::TfCodec;
 use tfserver::structures::temp_transport::TempTransport;
 use tfserver::structures::transport::{AsyncReadWrite, Transport};
-use tokio::time::sleep;
 use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
@@ -209,10 +208,6 @@ impl FakeCodec {
         let (shared, is_server) = match self.cfg.credentials {
             CredentialsSide::Server(_) => {
                 eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
-                //@TODO remove
-                let secs = rand::random_range(self.cfg.long_delay_secs.clone());
-
-                sleep(Duration::from_secs(secs as u64)).await;
                 DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
                 (self.handshake_from_server(stream).await, true)
             }
@@ -505,10 +500,9 @@ impl FakeCodec {
         &self,
         remote: &mut Option<(ProxyEndpoint, SenderSideChannel)>,
     ) -> Option<Bytes> {
-        if let Some((_, sender)) = remote {
-            sender.from_endpoint_rcv.recv().await
-        } else {
-            None
+        match remote {
+            Some((_, sender)) => sender.from_endpoint_rcv.recv().await,
+            None => std::future::pending().await,
         }
     }
 }
