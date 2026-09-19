@@ -4,7 +4,7 @@ pub struct FakeCodecRateLimiterCfg {
     pub bandwidth_max_derivation_percent: f64,
     pub packet_count_max_derivation_percent: f64,
     pub out_of_pattern_packets_max_ratio_percent: f64,
-    pub client_pattern: ConnectionPattern
+    pub client_pattern: ConnectionPattern,
 }
 
 impl Default for FakeCodecRateLimiterCfg {
@@ -30,7 +30,7 @@ pub struct FakeCodecRateLimiter {
 }
 
 impl FakeCodecRateLimiter {
-    pub fn new( security_cfg: FakeCodecRateLimiterCfg) -> Self {
+    pub fn new(security_cfg: FakeCodecRateLimiterCfg) -> Self {
         Self {
             client_pattern: security_cfg.client_pattern.clone(),
             bandwidth_counter: 0,
@@ -48,21 +48,32 @@ impl FakeCodecRateLimiter {
         }
     }
     pub fn check_if_valid(&self) -> bool {
-        if self.packet_counter as f64/ self.client_pattern.order_overall_len() as f64  -1f64
-            > self.cfg.packet_count_max_derivation_percent
-        {
-            return false;
+   
+        let order_len = self.client_pattern.order_overall_len();
+        let bandwidth_len = self.client_pattern.bandwidth_overall_len();
+
+        if order_len != 0 {
+            if self.packet_counter as f64 / order_len as f64 - 1f64
+                > self.cfg.packet_count_max_derivation_percent
+            {
+                return false;
+            }
+
+            if self.out_of_pattern_packet.len() as f64 / order_len as f64
+                > self.cfg.out_of_pattern_packets_max_ratio_percent
+            {
+                return false;
+            }
         }
-        if self.bandwidth_counter as f64 / self.client_pattern.bandwidth_overall_len()  as f64 -1f64
-            > self.cfg.bandwidth_max_derivation_percent
-        {
-            return false;
+
+        if bandwidth_len != 0 {
+            if self.bandwidth_counter as f64 / bandwidth_len as f64 - 1f64
+                > self.cfg.bandwidth_max_derivation_percent
+            {
+                return false;
+            }
         }
-        if self.out_of_pattern_packet.len() as f64 / self.client_pattern.order_overall_len() as f64
-            > self.cfg.out_of_pattern_packets_max_ratio_percent
-        {
-            return false;
-        }
+
         return true;
     }
 }

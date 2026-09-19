@@ -8,6 +8,11 @@ use tokio::sync::{broadcast, Mutex};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 
+/// Upper bound on a request body accepted during local proxy setup. The setup
+/// exchange is a single CONNECT or small GET; anything larger is a bug or an
+/// attempt to exhaust memory.
+const MAX_SETUP_BODY_LEN: usize = 1024 * 1024;
+
 pub struct ProxyInterface {
     connection_task: Option<tokio::task::JoinHandle<()>>,
     stop_sig: broadcast::Sender<()>,
@@ -15,29 +20,37 @@ pub struct ProxyInterface {
 }
 
 impl ProxyInterface {
-    pub async fn new(port: u16) -> (Self, SenderSideChannel) {
+    /// Bind the local setup proxy.
+    ///
+    /// The bind is awaited here rather than inside the spawned task: a failure
+    /// (a second instance, or the port squatted) used to panic a detached task
+    /// and surface much later as an unexplained handshake failure. Now it is an
+    /// ordinary error at the call site.
+    pub async fn new(port: u16) -> std::io::Result<(Self, SenderSideChannel)> {
         let listener =
-            TcpListener::bind("127.0.0.1:".to_string() + &port.to_string()).await;
+            TcpListener::bind("127.0.0.1:".to_string() + &port.to_string()).await?;
         let channel = handler_channel();
         let stop_sig = broadcast::channel(1);
         let connection_dest = Arc::new(Mutex::new(None));
         let connection_dest_task = connection_dest.clone();
         let connection_task = tokio::task::spawn(async move {
-            handle_connect(listener.unwrap(), channel.0, stop_sig.1, connection_dest_task).await;
+            handle_connect(listener, channel.0, stop_sig.1, connection_dest_task).await;
         });
-        (
+        Ok((
             Self {
                 connection_task: Some(connection_task),
                 stop_sig: stop_sig.0,
                 connection_dest,
             },
             channel.1,
-        )
+        ))
     }
 
     pub async fn join_proxy(&mut self) {
         if let Some(handle) = self.connection_task.take() {
-            handle.await.unwrap();
+            // The task may already be gone (aborted, or panicked); joining is
+            // best effort and must not take the caller down with it.
+            let _ = handle.await;
         }
     }
 
@@ -46,7 +59,9 @@ impl ProxyInterface {
     }
 
     pub async fn stop_proxy(&mut self) {
-        self.stop_sig.send(()).unwrap();
+        // Errors only when there are no receivers left, i.e. the task already
+        // exited — which is exactly the state this call is trying to reach.
+        let _ = self.stop_sig.send(());
     }
 
     pub async fn abort_proxy(&mut self) {
@@ -128,7 +143,7 @@ async fn handle_connect(
                     }
                     Err(disconnect) => {
                         if disconnect{
-                             eprintln!("Client disconnected");
+                             dbg_log!("Client disconnected");
                             return;
                         }
                     }
@@ -210,6 +225,14 @@ async fn proxy_setup(client: &mut TcpStream) -> Option<SetupResult> {
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
 
+    // `content_length` is attacker-controlled: it is whatever the local client
+    // wrote in the header. Allocating it directly is a free OOM for any process
+    // that can reach this port. The 16 KiB guard above only covers the header
+    // scan, so bound the body explicitly here and in the chunked path.
+    if content_length > MAX_SETUP_BODY_LEN {
+        return None;
+    }
+
     if is_chunked {
         read_chunked_body(client, &mut buf, header_len).await?;
     } else if content_length > 0 {
@@ -233,6 +256,11 @@ async fn read_chunked_body(client: &mut TcpStream, buf: &mut Vec<u8>, body_start
     let mut pos = body_start;
 
     loop {
+        // `buf` grows with every chunk and nothing else bounds it, so a peer
+        // that keeps sending chunks can grow it without limit.
+        if buf.len() > MAX_SETUP_BODY_LEN {
+            return None;
+        }
         let size_line_end = loop {
             if let Some(rel) = buf[pos..].windows(2).position(|w| w == b"\r\n") {
                 break pos + rel + 2;

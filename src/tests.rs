@@ -27,10 +27,12 @@ use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 use crate::strategy::{ConnectionPattern, UsedPacketSize};
 use crate::util::delay_generator::DelayType;
 use crate::util::rand_util::generate_random_u8_vec;
+use crate::util::replay_guard::ReplayGuard;
+use crate::codec::tls_codec::TLS_HEADER_LEN;
 
 #[tokio::test]
 async fn test_proxy() {
-    let proxy = ProxyInterface::new(9999).await;
+    let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
     let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
         .await
         .expect("Failed to create proxy endpoint");
@@ -61,7 +63,7 @@ async fn test_proxy() {
 }
 #[tokio::test]
 async fn test_tls_inspector() {
-    let proxy = ProxyInterface::new(9999).await;
+    let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
     let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
         .await
         .expect("Failed to create proxy endpoint");
@@ -123,7 +125,7 @@ async fn test_tls_pattern() {
 }
 //returns (client pattern, server pattern)
 async fn make_tls_pattern(target_dest: String, target_sni: String) -> (ConnectionPattern, ConnectionPattern){
-    let proxy = ProxyInterface::new(9999).await;
+    let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
     let endpoint = ProxyEndpoint::new(target_dest)
         .await
         .expect("Failed to create proxy endpoint");
@@ -176,7 +178,14 @@ pub struct TestServerCredProvider {}
 
 #[async_trait]
 impl ServerCredentialProvider for TestServerCredProvider {
-    async fn get_client_password(&self, client_identity: &str) -> Option<Vec<u8>> {
+    async fn get_client_password(
+        &self,
+        _client_identity: &str,
+        _time_in_auth_ms: u64,
+    ) -> Option<Vec<u8>> {
+        // NOTE: a real provider must reject a stale/replayed `_time_in_auth_ms`
+        // (e.g. <= the last accepted value for this identity). The test provider
+        // runs a single handshake, so it accepts unconditionally.
         Some("HelloPasswordForHandshake".as_bytes().to_vec())
     }
 }
@@ -239,6 +248,8 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         max_adjusted_padding_derivation_percent: 0.8f64,
         allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))],
         long_delay_secs: 2..8,
+        handshake_timeout: Duration::from_secs(30),
+        replay_guard: Some(Arc::new(ReplayGuard::new(60_000))),
     };
 
     let listener = TcpListener::bind("64.111.93.111:443").await.unwrap();
@@ -310,6 +321,8 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         max_adjusted_padding_derivation_percent: 0.8f64,
         allowed_delays: vec![DelayType::ArraySort((32, 2)), DelayType::SpinLoop(Duration::from_micros(150)), DelayType::ArraySort((22, 2))],
         long_delay_secs: 2..8,
+        handshake_timeout: Duration::from_secs(30),
+        replay_guard: None,
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
@@ -317,7 +330,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);
-        let mut proxy_interface = ProxyInterface::new(9985).await;
+        let mut proxy_interface = ProxyInterface::new(9985).await.expect("bind local proxy");
         loop {
             tokio::select! {
                 data = proxy_interface.1.from_endpoint_rcv.recv() => {
@@ -372,14 +385,19 @@ pub fn test_record_pattern(
     packet: &[u8],
 ) -> PacketAnalyzeFuture {
     Box::pin(async move {
-        eprintln!("contents: {}", String::from_utf8_lossy(packet));
         let app_data = app_data.unwrap();
         let mut data_lock = app_data.lock().await;
         let records = data_lock.reassembler.inspect_bytes(packet);
-        records.iter().for_each(|record| {
-            if record.header.record_type == TlsRecordType::ApplicationData{
-                data_lock.patternizer.insert_packet(UsedPacketSize{size: packet.len(), repeat_times: 0});
-            }
-        });
+      
+        let record_sizes: Vec<usize> = records
+            .iter()
+            .filter(|record| record.header.record_type == TlsRecordType::ApplicationData)
+            .map(|record| TLS_HEADER_LEN + record.header.len as usize)
+            .collect();
+        for size in record_sizes {
+            data_lock
+                .patternizer
+                .insert_packet(UsedPacketSize { size, repeat_times: 1 });
+        }
     })
 }

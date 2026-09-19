@@ -48,21 +48,28 @@ impl ConnectionPattern {
         Self::default()
     }
     pub fn insert_packet(&mut self, mut packet: UsedPacketSize){
-        let mut found_known = false;
-        packet.repeat_times = 1;
+        // The caller's `repeat_times` used to be overwritten with 1 before it was
+        // read, so a caller reporting N consecutive records of one size was
+        // counted as a single record: run lengths in `order`, the known-size
+        // histogram and the bandwidth total all under-counted every repeat.
+        let repeat = packet.repeat_times.max(1);
+        packet.repeat_times = repeat;
 
-        self.order_overall_len += packet.repeat_times;
-        self.bandwidth_overall_len+=packet.size*packet.repeat_times;
-        if let Some(known_size_repeat) = self.known_packet_sizes.get_mut(&packet.size) {
-            found_known = true;
-            *known_size_repeat+=1;
-        }
-        if !self.order.is_empty(){
-            let order_max_idx = self.order.len()-1;
-            if self.order[order_max_idx].size == packet.size{
-                self.order[order_max_idx].repeat_times+=1;
+        self.order_overall_len += repeat;
+        self.bandwidth_overall_len += packet.size * repeat;
 
-            }else {
+        let found_known =
+            if let Some(known_size_repeat) = self.known_packet_sizes.get_mut(&packet.size) {
+                *known_size_repeat += repeat;
+                true
+            } else {
+                false
+            };
+
+        if let Some(last) = self.order.last_mut() {
+            if last.size == packet.size {
+                last.repeat_times += repeat;
+            } else {
                 self.order.push(packet.clone());
             }
         } else {
@@ -70,8 +77,7 @@ impl ConnectionPattern {
         }
 
         if !found_known {
-
-            self.known_packet_sizes.insert(packet.size, packet.repeat_times);
+            self.known_packet_sizes.insert(packet.size, repeat);
         }
     }
 
@@ -126,6 +132,45 @@ impl ConnectionPattern {
             }
         }
         None
+    }
+
+    /// Like [`Self::select_packet_size`], but picks uniformly among **all**
+    /// acceptable sizes rather than always returning the smallest.
+    ///
+    /// `select_packet_size` is a pure function of its input, so a message whose
+    /// serialized length is fixed — every `ClientBegin` and `ServerBegin` is,
+    /// they have no variable-length field — gets the same target on every
+    /// connection, and therefore the same wire length every time. Two
+    /// fixed-length records at a fixed point in the flow are a fingerprint, so
+    /// the handshake path picks from the whole acceptable run instead.
+    ///
+    /// Every candidate is still a size the cover site genuinely emits; this only
+    /// changes *which* of them is chosen.
+    pub fn select_packet_size_randomized(
+        &self,
+        size: usize,
+        max_derivation_percent: f64,
+    ) -> Option<usize> {
+        if size == 0 {
+            return None;
+        }
+        let mut candidates = Vec::new();
+        for packet in self.sorted_packet_sizes.iter() {
+            if *packet >= size {
+                if *packet as f64 / size as f64 - 1f64 < max_derivation_percent {
+                    candidates.push(*packet);
+                } else {
+                    // Ascending order, so everything beyond this is further out
+                    // of bounds too.
+                    break;
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = rand::rng().random_range(0..candidates.len());
+        Some(candidates[idx])
     }
 
     pub fn select_packet_size_with_random_padding_fallback(&self, size: usize, max_derivation_percent: f64, random_padding: Range<usize>) -> usize {

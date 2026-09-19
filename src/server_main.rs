@@ -1,6 +1,8 @@
 use tfserver::sha2::{Digest, Sha256};
 use crate::tests::{test_fake_tls_codec_server};
 
+#[macro_use]
+pub mod log;
 pub mod strategy;
 pub mod http_proxy;
 pub mod util;

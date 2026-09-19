@@ -15,6 +15,11 @@ name = "client"
 path = "src/lib.rs"
 name = "bsobfs"
 
+[features]
+# Debug logging on the connection path. Off by default: a release server must
+# not write logins or record contents to stderr.
+debug-logging = []
+
 [dependencies]
 the-fourth-server = "0.4"
 

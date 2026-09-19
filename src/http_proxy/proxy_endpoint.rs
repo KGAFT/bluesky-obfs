@@ -17,19 +17,19 @@ pub struct ProxyEndpoint {
 
 impl ProxyEndpoint {
     pub async fn new(destination: String) -> io::Result<(Self, SenderSideChannel)> {
-        eprintln!("[FakeCodec DEBUG] starting connect to destination: {}", destination);
+        dbg_log!("[FakeCodec DEBUG] starting connect to destination: {}", destination);
         let connection = match timeout(Duration::from_secs(10), TcpStream::connect(destination.clone())).await {
             Ok(res) => res,
-            Err(e) => {
-                eprintln!("[FakeCodec DEBUG] Connection to {} timed out after {}", destination, e);
+            Err(_e) => {
+                dbg_log!("[FakeCodec DEBUG] Connection to {} timed out after {}", destination, _e);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "Connection timed out"));
             }
         };
         if let Err(e) = connection {
-            eprintln!("[FakeCodec DEBUG] Failed to connect to destination {}: {}", destination, e);
+            dbg_log!("[FakeCodec DEBUG] Failed to connect to destination {}: {}", destination, e);
             return Err(e);
         }
-        eprintln!("[FakeCodec DEBUG] connected to destination: {}", destination);
+        dbg_log!("[FakeCodec DEBUG] connected to destination: {}", destination);
         let connection = connection?;
         connection.set_nodelay(true)?;
         let channel = handler_channel();
@@ -65,12 +65,12 @@ impl ProxyEndpoint {
 
     pub async fn join_endpoint(&mut self) {
         if let Some(handle) = self.connection_task.take() {
-            handle.await.unwrap();
+            let _ = handle.await;
         }
     }
 
     pub async fn stop_endpoint(&mut self) {
-        self.stop_sig.send(()).unwrap();
+        let _ = self.stop_sig.send(());
     }
 
     pub async fn abort_endpoint(&mut self) {
@@ -112,7 +112,7 @@ pub async fn endpoint_main(
                     }
                     Err(disconnect) => {
                         if disconnect{
-                             eprintln!("Client disconnected");
+                             dbg_log!("Client disconnected");
                             return;
                         }
                     }

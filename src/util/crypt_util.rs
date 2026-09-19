@@ -5,6 +5,10 @@ use aes_gcm::{
 use rand::RngCore;
 
 
+/// Bytes [`aes256_gcm_encrypt`] adds on top of its input: the 12-byte nonce it
+/// prepends plus the 16-byte GCM tag.
+pub const AES_GCM_OVERHEAD: usize = 12 + 16;
+
 pub fn aes256_gcm_encrypt(
     key: &[u8],
     message: &[u8],

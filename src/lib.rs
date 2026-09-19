@@ -1,3 +1,5 @@
+#[macro_use]
+pub mod log;
 pub mod strategy;
 pub mod http_proxy;
 pub mod util;

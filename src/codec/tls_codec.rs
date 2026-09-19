@@ -6,7 +6,7 @@ use tokio_util::bytes::{Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub const TLS_HEADER_LEN: usize = 5;
-pub const TLS_MAX_RECORD_LEN: usize = 16 * 1024 + 2048;
+pub const TLS_MAX_RECORD_LEN: usize = 16640;
 #[derive(Clone)]
 pub struct TlsCodec;
 

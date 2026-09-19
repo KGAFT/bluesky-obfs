@@ -4,6 +4,7 @@ use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
 use crate::http_proxy::proxy_interface::ProxyInterface;
 use crate::strategy::ConnectionPattern;
 use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
+use crate::util::replay_guard::ReplayGuard;
 use crate::util::session_keys::SessionKeys;
 
 use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
@@ -35,8 +36,9 @@ pub struct FakeCodecCfg {
     pub rate_limiter: Option<FakeCodecRateLimiterCfg>,
     pub max_adjusted_padding_derivation_percent: f64,
     pub allowed_delays: Vec<DelayType>,
-    pub long_delay_secs: Range<u16>
-
+    pub long_delay_secs: Range<u16>,
+    pub replay_guard: Option<Arc<ReplayGuard>>,
+    pub handshake_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -47,13 +49,20 @@ pub enum CredentialsSide {
 
 #[async_trait]
 pub trait ServerCredentialProvider: Send + Sync + 'static {
-    async fn get_client_password(&self, client_identity: &str) -> Option<Vec<u8>>;
+    ///Store the time of last successfull auth in somewhere else database and so on, if the time is skewed,
+    /// or equal or less the last db record it's obvious replay, return None
+    async fn get_client_password(&self, client_identity: &str, time_in_auth_ms: u64) -> Option<Vec<u8>>;
 }
 
 #[async_trait]
 pub trait ClientCredentialProvider: Send + Sync + 'static {
     async fn get_client_credentials(&self) -> Option<(Vec<u8>, Vec<u8>)>;
 }
+
+/// Bytes a tunnel record costs on the wire beyond its payload: the TLS record
+/// header, the `u16` padding length, and the AEAD tag. The record counter is
+/// implicit and contributes nothing here.
+pub const RECORD_OVERHEAD: usize = TLS_HEADER_LEN + 2 + SessionKeys::seal_overhead();
 
 pub struct FakeCodec {
     cfg: FakeCodecCfg,
@@ -114,27 +123,42 @@ impl Decoder for FakeCodec {
 impl Encoder<Bytes> for FakeCodec {
     type Error = io::Error;
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        // Snapshot so any error path can restore `dst` to exactly what it held
+        // before this record — `dst` may already contain earlier encoded records.
+        let original_len = dst.len();
         let Some(keys) = &self.session_keys else {
-            eprintln!("[FakeCodec DEBUG] encode: session_keys is None, cannot encrypt");
+            dbg_log!("[FakeCodec DEBUG] encode: session_keys is None, cannot encrypt");
             return Err(io::Error::new(io::ErrorKind::Other, "encryption failed"));
         };
 
-        let padding_len = self
+        // Size against the **wire** length, not the payload length.
+        //
+        // Picking the target from `item.len()` alone made every emitted record
+        // exactly RECORD_OVERHEAD bytes larger than the size the pattern chose,
+        // so the observed size distribution was the cover site's distribution
+        // shifted by a fixed constant — a trivial distinguisher for anyone
+        // comparing against genuine traffic to the same site.
+        let min_wire_len = item.len() + RECORD_OVERHEAD;
+        let target_wire_len = self
             .cfg
             .pattern
             .select_packet_size_with_random_padding_fallback(
-                item.len(),
+                min_wire_len,
                 self.cfg.max_adjusted_padding_derivation_percent,
                 self.cfg.message_padding_size.clone(),
-            )-item.len();
+            );
+        // Both branches of the fallback return a value >= the size passed in, so
+        // this cannot underflow.
+        let padding_len = target_wire_len - min_wire_len;
         debug_assert!(padding_len <= u16::MAX as usize);
 
         // plaintext body = [padding_len: u16][padding bytes][payload]
         let body_len = 2 + padding_len + item.len();
         let sealed_len = SessionKeys::sealed_len(body_len);
+        debug_assert_eq!(TLS_HEADER_LEN + sealed_len, target_wire_len);
 
         if TLS_HEADER_LEN + sealed_len > TLS_MAX_RECORD_LEN {
-            eprintln!(
+            dbg_log!(
                 "[FakeCodec DEBUG] encode: sealed record {} exceeds max {}",
                 TLS_HEADER_LEN + sealed_len,
                 TLS_MAX_RECORD_LEN
@@ -171,9 +195,14 @@ impl Encoder<Bytes> for FakeCodec {
 
         let mut body = dst.split_off(body_start);
         if keys.seal_in_place(&mut body).is_none() {
-            eprintln!("[FakeCodec DEBUG] encode: encryption failed (seal_in_place returned None)");
+            dbg_log!("[FakeCodec DEBUG] encode: encryption failed (seal_in_place returned None)");
             dst.unsplit(body);
-            dst.truncate(dst.len().saturating_sub(sealed_len + TLS_HEADER_LEN));
+            // Restore `dst` to exactly what it held on entry. The previous
+            // arithmetic subtracted `sealed_len + TLS_HEADER_LEN` from a buffer
+            // that only grew by `body_len + TLS_HEADER_LEN` — the body is still
+            // unsealed on this path — so it ate `seal_overhead()` bytes of
+            // whatever records were already encoded ahead of this one.
+            dst.truncate(original_len);
             return Err(io::Error::new(io::ErrorKind::Other, "encryption failed"));
         }
         debug_assert_eq!(body.len(), sealed_len);
@@ -187,6 +216,7 @@ impl Encoder<Bytes> for FakeCodec {
 
 #[async_trait]
 impl TfCodec for FakeCodec {
+    ///If initial_setup failed multiple times, you've probably want to temporarily blacklist this client
     async fn initial_setup(&mut self, transport: &mut Transport) -> bool {
         self.setup_stream(transport).await
     }
@@ -202,32 +232,48 @@ impl FakeCodec {
             leftover: BytesMut::new(),
         }
     }
-
+    ///If setup_stream failed multiple times, you've probably want to temporarily blacklist this client
     pub async fn setup_stream<T: AsyncReadWrite + Send + Sync>(&mut self, stream: &mut T) -> bool {
-        eprintln!("[FakeCodec DEBUG] setup_stream: Starting setup");
+        dbg_log!("[FakeCodec DEBUG] setup_stream: Starting setup");
+        let deadline = self.cfg.handshake_timeout;
         let (shared, is_server) = match self.cfg.credentials {
             CredentialsSide::Server(_) => {
-                eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Server");
-                DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
-                (self.handshake_from_server(stream).await, true)
+                dbg_log!("[FakeCodec DEBUG] setup_stream: Acting as Server");
+                DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
+                let res = tokio::time::timeout(deadline, self.handshake_from_server(stream)).await;
+                match res {
+                    Ok(v) => (v, true),
+                    Err(_) => {
+                        dbg_log!("[FakeCodec DEBUG] setup_stream: server handshake timed out");
+                        (None, true)
+                    }
+                }
             }
             CredentialsSide::Client(_) => {
-                eprintln!("[FakeCodec DEBUG] setup_stream: Acting as Client");
-                (self.handshake_from_client(stream).await, false)
+                dbg_log!("[FakeCodec DEBUG] setup_stream: Acting as Client");
+                let res = tokio::time::timeout(deadline, self.handshake_from_client(stream)).await;
+                match res {
+                    Ok(v) => (v, false),
+                    Err(_) => {
+                        dbg_log!("[FakeCodec DEBUG] setup_stream: client handshake timed out");
+                        (None, false)
+                    }
+                }
             }
         };
-        if let Some((shared, base_tls_header)) = shared {
-            let session_keys = SessionKeys::derive_session_keys(shared.as_slice(), is_server);
+        if let Some((shared, base_tls_header, transcript)) = shared {
+            let session_keys =
+                SessionKeys::derive_session_keys(shared.as_slice(), transcript.as_slice(), is_server);
             if let Some(keys) = session_keys {
-                eprintln!("[FakeCodec DEBUG] setup_stream: Session keys derived successfully");
+                dbg_log!("[FakeCodec DEBUG] setup_stream: Session keys derived successfully");
                 self.session_keys = Some(keys);
                 self.base_tls_header = Some(base_tls_header);
                 return true;
             }
-            eprintln!("[FakeCodec DEBUG] setup_stream: Failed to derive session keys");
+            dbg_log!("[FakeCodec DEBUG] setup_stream: Failed to derive session keys");
             return false;
         } else {
-            eprintln!("[FakeCodec DEBUG] setup_stream: Handshake returned None");
+            dbg_log!("[FakeCodec DEBUG] setup_stream: Handshake returned None");
             return false;
         }
     }
@@ -235,10 +281,20 @@ impl FakeCodec {
     async fn handshake_from_client<T: AsyncReadWrite + Send + Sync>(
         &mut self,
         stream: &mut T,
-    ) -> Option<(Vec<u8>, Vec<u8>)> {
-        eprintln!("[FakeCodec DEBUG] handshake_from_client: Starting handshake");
+    ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        dbg_log!("[FakeCodec DEBUG] handshake_from_client: Starting handshake");
         let mut injector = Spake2Injector::new(self.cfg.clone());
-        let mut local_proxy = ProxyInterface::new(self.cfg.setup_proxy_port).await;
+
+        let mut local_proxy = match ProxyInterface::new(self.cfg.setup_proxy_port).await {
+            Ok(p) => p,
+            Err(_e) => {
+                dbg_log!(
+                    "[FakeCodec DEBUG] handshake_from_client: failed to bind local setup proxy on port {}: {}",
+                    self.cfg.setup_proxy_port, _e
+                );
+                return None;
+            }
+        };
         let mut temp_transport = Framed::new(TempTransport::new(stream), TlsCodec::new());
         let client = self.init_wreq_instance();
         let mut base_tls_header: Option<Vec<u8>> = None;
@@ -254,16 +310,16 @@ impl FakeCodec {
             tokio::select! {
                 resp = &mut req_fut => {
                     drop(local_proxy);
-                    if let Err(err) = resp {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", err);
+                    if let Err(_err) = resp {
+                        dbg_log!("[FakeCodec DEBUG] handshake_from_client: failed to connect to remote: {:?}", _err);
                         return None;
                     }
 
-                    eprintln!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
+                    dbg_log!("[FakeCodec DEBUG] handshake_from_client: Successfully got target sni response");
                     match injector.state() {
                         Spake2State::SecondPartNegotiated(_) => {}
                         _ => {
-                            eprintln!("Failed to handshake");
+                            dbg_log!("Failed to handshake");
                             return None;
                         }
                     }
@@ -271,7 +327,7 @@ impl FakeCodec {
                 }
                 packet_to_send = local_proxy.1.from_endpoint_rcv.recv() => {
                     let Some(packet) = packet_to_send else {
-                        eprintln!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
+                        dbg_log!("[FakeCodec DEBUG] handshake_from_client: local_proxy channel closed");
                         break;
                     };
                     if base_tls_header.is_none() && is_application_data(&packet) {
@@ -279,14 +335,14 @@ impl FakeCodec {
                     }
                     match injector.on_local_packet(packet).await {
                         Some(out) => {
-                            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
+                            DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
                             if send_message(&mut temp_transport, out).await.is_err() {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
+                                dbg_log!("[FakeCodec DEBUG] handshake_from_client: Failed to send packet to temp_transport");
                                 break;
                             }
                         }
                         None => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: injection failed, aborting");
+                            dbg_log!("[FakeCodec DEBUG] handshake_from_client: injection failed, aborting");
                             break;
                         }
                     }
@@ -299,14 +355,14 @@ impl FakeCodec {
                                     let _ = local_proxy.1.to_endpoint_snd.send(out).await;
                                 }
                                 None => {
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_client: finish failed, aborting");
+                                    dbg_log!("[FakeCodec DEBUG] handshake_from_client: finish failed, aborting");
                                     break;
                                 }
                             }
                         }
                         Ok(None) => {}
                         Err(terminates) => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
+                            dbg_log!("[FakeCodec DEBUG] handshake_from_client: receive_message error, terminates: {}", terminates);
                             if terminates {
                                 break;
                             }
@@ -321,7 +377,7 @@ impl FakeCodec {
         }?;
 
         if let Some(packet) = injector.packet_after_handshake().await{
-            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
+            DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
@@ -343,24 +399,27 @@ impl FakeCodec {
         }
 
         if let Some(packet) = injector.packet_after_handshake().await{
-            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
+            DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
         }
 
-        eprintln!(
-            "[FakeCodec DEBUG] handshake_from_client: Exiting loop, base_tls_header is_some: {}",
-            base_tls_header.is_some()
+
+        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
+        dbg_log!(
+            "[FakeCodec DEBUG] handshake_from_client: Exiting loop, base_tls_header is_some: {}, leftover: {} bytes",
+            base_tls_header.is_some(),
+            self.leftover.len()
         );
-        Some((shared, base_tls_header?))
+        Some((shared, base_tls_header?, injector.transcript_bytes()))
     }
 
     async fn handshake_from_server<T: AsyncReadWrite + Send + Sync>(
         &mut self,
         stream: &mut T,
-    ) -> Option<(Vec<u8>, Vec<u8>)> {
-        eprintln!("[FakeCodec DEBUG] handshake_from_server: Starting handshake");
+    ) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        dbg_log!("[FakeCodec DEBUG] handshake_from_server: Starting handshake");
         let mut injector = Spake2Injector::new(self.cfg.clone());
         let mut proxy_endpoint: Option<(ProxyEndpoint, SenderSideChannel)> = None;
         let mut temp_transport = Framed::new(TempTransport::new(stream), TlsCodec::new());
@@ -374,20 +433,24 @@ impl FakeCodec {
                             match injector.on_remote_packet(data.freeze()).await {
                                 Some(out) => {
                                     if self.try_send_to_remote(&mut proxy_endpoint, out).await.is_none() {
-                                        eprintln!("[FakeCodec DEBUG] handshake_from_server: failed to forward to remote");
+                                        dbg_log!("[FakeCodec DEBUG] handshake_from_server: failed to forward to remote");
                                         break;
                                     }
                                 }
                                 None => {
-                                      drop(proxy_endpoint);
-                                    eprintln!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
+                                    drop(proxy_endpoint);
+                                    if injector.is_rate_limited() {
+                                        dbg_log!("[FakeCodec DEBUG] handshake_from_server: rate limit exceeded, dropping");
+                                    } else {
+                                        dbg_log!("[FakeCodec DEBUG] handshake_from_server: handshake complete");
+                                    }
                                     break;
                                 }
                             }
                         }
                         Ok(None) => {}
                         Err(terminates) => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
+                            dbg_log!("[FakeCodec DEBUG] handshake_from_server: receive_message error, terminates: {}", terminates);
                             if terminates {
                                 break;
                             }
@@ -403,14 +466,14 @@ impl FakeCodec {
                     }
                     match injector.on_local_packet(packet).await {
                         Some(out) => {
-                            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
+                            DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
                             if send_message(&mut temp_transport, out).await.is_err() {
-                                eprintln!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
+                                dbg_log!("[FakeCodec DEBUG] handshake_from_server: Failed to send packet to temp_transport");
                                 break;
                             }
                         }
                         None => {
-                            eprintln!("[FakeCodec DEBUG] handshake_from_server: injection failed, aborting");
+                            dbg_log!("[FakeCodec DEBUG] handshake_from_server: injection failed, aborting");
                             break;
                         }
                     }
@@ -419,13 +482,20 @@ impl FakeCodec {
         }
 
 
+        // A limiter drop must not be promoted into the tunnel just because the
+        // SPAKE2 exchange happened to complete before the limit was hit.
+        if injector.is_rate_limited() {
+            dbg_log!("[FakeCodec DEBUG] handshake_from_server: refusing rate-limited connection");
+            return None;
+        }
+
         let shared = match injector.state() {
             Spake2State::SecondPartNegotiated(shared) => Some(shared.clone()),
             _ => None,
         }?;
 
         if let Some(packet) = injector.packet_after_handshake().await {
-            DelayGenerator::pick_and_perform_delay(self.cfg.allowed_delays.as_slice());
+            DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
@@ -445,13 +515,19 @@ impl FakeCodec {
             attempts += 1;
         }
 
-      //  self.leftover = std::mem::take(temp_transport.read_buffer_mut());
-        eprintln!(
-            "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: true, base_tls_header is_some: {}",
-
-            base_tls_header.is_some()
+        // Hand the framer's residual read buffer to the codec. `Framed` reads in
+        // chunks, so if the peer coalesced its final Begin record with the first
+        // tunnel record into one segment, that tunnel record is sitting here and
+        // is lost the moment `temp_transport` is dropped — the stream then
+        // desyncs and the connection drops. This is the "garbage in the client
+        // pipe" failure; commenting the line out hid it rather than fixing it.
+        self.leftover = std::mem::take(temp_transport.read_buffer_mut());
+        dbg_log!(
+            "[FakeCodec DEBUG] handshake_from_server: Exiting loop. shared is_some: true, base_tls_header is_some: {}, leftover: {} bytes",
+            base_tls_header.is_some(),
+            self.leftover.len()
         );
-        Some((shared, base_tls_header?))
+        Some((shared, base_tls_header?, injector.transcript_bytes()))
     }
 
     fn init_wreq_instance(&self) -> Client {
@@ -478,10 +554,10 @@ impl FakeCodec {
             remote.replace(
                 match ProxyEndpoint::new(self.cfg.target_sni_connection_dest.clone()).await {
                     Ok(ep) => ep,
-                    Err(e) => {
-                        eprintln!(
+                    Err(_e) => {
+                        dbg_log!(
                             "[FakeCodec DEBUG] handshake_from_server: Failed to create ProxyEndpoint: {}",
-                            e
+                            _e
                         );
                         return None;
                     }

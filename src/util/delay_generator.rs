@@ -18,6 +18,32 @@ impl DelayGenerator {
         }
     }
     
+    /// Async variant, for every call site that can await.
+    ///
+    /// The synchronous versions below burn the calling thread: `spin_loop_delay`
+    /// spins and `array_sort_delay` sorts. Called from a tokio worker they stall
+    /// every other connection scheduled on that worker, which is both a
+    /// throughput problem and a timing side channel across connections. Here a
+    /// `SpinLoop` becomes a real timer, and the deliberate CPU burn of
+    /// `ArraySort` moves to the blocking pool where it belongs.
+    pub async fn pick_and_perform_delay_async(delays: &[DelayType]) {
+        if delays.is_empty() {
+            return;
+        }
+        let delay_idx = rand::random_range(..delays.len());
+        match delays[delay_idx].clone() {
+            DelayType::SpinLoop(dur) => {
+                tokio::time::sleep(dur).await;
+            }
+            DelayType::ArraySort((array_size, amount)) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    Self::array_sort_delay(array_size, amount);
+                })
+                .await;
+            }
+        }
+    }
+
     pub fn perform_delay(delay: &DelayType){
         match delay {
             DelayType::ArraySort(times) => {
