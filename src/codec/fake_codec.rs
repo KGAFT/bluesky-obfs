@@ -9,7 +9,6 @@ use crate::util::session_keys::SessionKeys;
 
 use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
 use std::io;
-use std::net::SocketAddr;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;

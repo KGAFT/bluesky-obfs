@@ -1,16 +1,17 @@
 
 
-use bsobfs::codec::tls_codec::TLS_HEADER_LEN;
-use bsobfs::http_proxy::proxy_endpoint::ProxyEndpoint;
-use bsobfs::http_proxy::proxy_interface::ProxyInterface;
-use bsobfs::strategy::{ConnectionPattern, UsedPacketSize};
-use bsobfs::tls_inspector::{TlsDirection, TlsRecordReassembler};
-use bsobfs::tls_parser::TlsRecordType;
-use bsobfs::util::io_util::{PacketAnalyzeFuture, hardwire_proxy_to_endpoint};
-use bsobfs::wreq::{Client, Emulation, Proxy};
+use crate::codec::tls_codec::TLS_HEADER_LEN;
+use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
+use crate::http_proxy::proxy_interface::ProxyInterface;
+use crate::strategy::{ConnectionPattern, UsedPacketSize};
+use crate::tls_inspector::{TlsDirection, TlsRecordReassembler};
+
+use crate::util::io_util::{PacketAnalyzeFuture, hardwire_proxy_to_endpoint};
+use wreq::{Client, Emulation, Proxy};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tfserver::structures::s_type;
+use tls_parser::TlsRecordType;
 use tokio::fs;
 use tokio::sync::{Mutex, broadcast};
 
@@ -44,8 +45,7 @@ impl PatternStore {
         }
     }
 
-    /// Reads both files. `None` if either is missing or does not decode -
-    /// a half-present pair is useless, the two sides must match.
+
     pub async fn load(&self) -> Option<PatternPair> {
         let client_bytes = fs::read(&self.client_path).await.ok()?;
         let server_bytes = fs::read(&self.server_path).await.ok()?;
