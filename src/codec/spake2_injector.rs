@@ -271,13 +271,6 @@ impl Spake2Injector {
     async fn on_server_side_remote_packet(&mut self, data: Bytes) -> Option<Bytes> {
         let is_app = is_application_data(&data);
 
-        if is_app && let Some(limiter) = self.rate_limiter.as_mut() {
-            limiter.register_client_packet(data.as_ref());
-            if !limiter.check_if_valid() {
-                self.rate_limited = true;
-                return None;
-            }
-        }
 
         match &self.state {
             Spake2State::Begin => {
@@ -289,19 +282,23 @@ impl Spake2Injector {
                     )
                         .await
                     {
-                        // Reject a stale or already-seen hello *here*, before any
-                        // state changes, so a replay is indistinguishable from a
-                        // record that was never a hello at all: we fall through
-                        // and keep proxying to the cover site. Anything that
-                        // aborted or answered differently would hand a DPI box
-                        // exactly the oracle this check exists to deny.
+
                         if let Some(guard) = self.cfg.replay_guard.as_ref() {
                             if !guard.accept(&hello.nonce, hello.current_time) {
                                 dbg_log!(
                                     "[FakeCodec DEBUG] on_server_side_remote_packet: hello rejected by replay guard, continuing as cover traffic"
                                 );
+                                if !self.limiter_accepts(data.as_ref()) {
+                                    return None;
+                                }
                                 return Some(data);
                             }
+                        }
+
+                        // Charge the cover record the hello replaced, not the
+                        // hello itself.
+                        if !self.limiter_accepts(hello.original_packet.as_slice()) {
+                            return None;
                         }
 
                         self.transcript.client_auth = hello.auth_data.clone();
@@ -315,12 +312,18 @@ impl Spake2Injector {
                         self.tx_counter = 0;
                         return Some(Bytes::from(data));
                     }
+                    if !self.limiter_accepts(data.as_ref()) {
+                        return None;
+                    }
                 }
                 Some(data)
             }
             Spake2State::FirstPartNegotiated(_fp) => {
                 if is_app {
                     self.rx_counter += 1;
+                    if !self.limiter_accepts(data.as_ref()) {
+                        return None;
+                    }
                 }
                 Some(data)
             }
@@ -333,19 +336,34 @@ impl Spake2Injector {
                     {
                         return None;
                     }
+                    if !self.limiter_accepts(data.as_ref()) {
+                        return None;
+                    }
                 }
                 Some(data)
             }
         }
     }
 
+    /// Registers a client record with the rate limiter. Returns `false` and
+    /// marks the connection rate-limited once the client exceeds its budget.
+    fn limiter_accepts(&mut self, record: &[u8]) -> bool {
+        let Some(limiter) = self.rate_limiter.as_mut() else {
+            return true;
+        };
+        limiter.register_client_packet(record);
+        if limiter.check_if_valid() {
+            return true;
+        }
+        self.rate_limited = true;
+        false
+    }
+
     async fn on_client_side_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
         let is_app = is_application_data(&data);
         match &self.state {
             Spake2State::Begin => {
-                // `>=`, not `==`: target_packet comes from a pattern recorded in a
-                // different session, so this session may skip past it. An equality
-                // test would then never fire and the handshake would stall silently.
+
                 if is_app && self.tx_counter >= self.target_packet {
                     self.tx_counter += 1;
                     let res = Self::inject_client_message(&self.cfg, data.to_vec()).await?;

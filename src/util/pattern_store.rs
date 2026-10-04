@@ -128,8 +128,9 @@ pub async fn capture_tls_pattern(
         .build()
         .expect("client");
 
-    let _ = client.get(target_sni).send().await.expect("response");
-
+    let res = client.get(target_sni).send().await.expect("response");
+    let text = res.bytes().await.expect("bytes");
+    drop(text);
     stop_sig.0.send(()).unwrap();
 
     let mut client_lock = client_capture.lock().await;

@@ -25,7 +25,6 @@ use crate::util::pattern_store::PatternStore;
 async fn test_proxy() {
     use crate::util::io_util::hardwire_proxy_to_endpoint;
     use tokio::sync::broadcast;
-
     let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
     let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
         .await

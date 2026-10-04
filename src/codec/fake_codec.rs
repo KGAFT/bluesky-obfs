@@ -298,11 +298,23 @@ impl FakeCodec {
         let client = self.init_wreq_instance();
         let mut base_tls_header: Option<Vec<u8>> = None;
 
-        let req_fut = client
+        let req_fut = async {
+            let res = client
             .get(self.cfg.target_sni.clone())
             .timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(30))
-            .send();
+            .send().await;
+            if let Ok(res) = res {
+                let data = res.bytes().await;
+                if let Ok(_data) = data {
+                    return Ok(());
+                } else {
+                    return Err(data.unwrap_err());
+                }
+            } else {
+                return Err(res.unwrap_err());
+            }
+        };
         tokio::pin!(req_fut);
 
         loop {
