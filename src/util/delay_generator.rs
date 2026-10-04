@@ -34,10 +34,15 @@ impl DelayGenerator {
         match delays[delay_idx].clone() {
             DelayType::SpinLoop(dur) => {
                 let cur_time = Instant::now();
-                while cur_time.elapsed() < dur{}
+                let _ = tokio::task::spawn_blocking(move || {
+                    while cur_time.elapsed() < dur {}
+                }).await;
             }
             DelayType::ArraySort((array_size, amount)) => {
-                Self::array_sort_delay(array_size, amount);
+                let _ = tokio::task::spawn_blocking(move || {
+                    Self::array_sort_delay(array_size, amount);
+                })
+                    .await;
             }
         }
     }
