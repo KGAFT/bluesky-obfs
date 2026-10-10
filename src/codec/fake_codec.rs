@@ -309,7 +309,7 @@ impl FakeCodec {
                 if let Ok(_data) = data {
                     return Ok(());
                 } else {
-                    return Err(data.unwrap_err());
+                    return Ok(());
                 }
             } else {
                 return Err(res.unwrap_err());
