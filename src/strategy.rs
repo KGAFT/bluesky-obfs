@@ -1,17 +1,20 @@
+use the_fourth_utils::rand;
 use std::collections::HashMap;
 use std::ops::Range;
-use rand::Rng;
-use rkyv::{Archive, Deserialize, Serialize};
-use tfserver::structures::s_type::{StrongType, StructureType};
+use the_fourth_utils::rand::RngExt;
+use the_fourth_utils::rkyv::{Archive, Deserialize, Serialize};
+use the_fourth_utils::structures::s_type::{StrongType, StructureType};
 use crate::util::ob_s_type::ObSType;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct UsedPacketSize{
     pub size: usize,
     pub repeat_times: usize,
 
 }
 #[derive(Serialize, Deserialize, Debug, Archive, Clone)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct ConnectionPattern {
     s_type: ObSType,
     ///packets sorted by size in descending order, the repeat_times represent how much packet was repeated at all time

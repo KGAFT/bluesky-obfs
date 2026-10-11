@@ -1,3 +1,5 @@
+use the_fourth_utils::rand;
+
 /// Fill a fresh vector with uniform random bytes over the **full** `0..=255`
 /// range.
 ///

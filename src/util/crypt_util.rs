@@ -1,8 +1,9 @@
+use the_fourth_utils::rand;
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use rand::RngCore;
+use the_fourth_utils::rand::Rng;
 
 
 /// Bytes [`aes256_gcm_encrypt`] adds on top of its input: the 12-byte nonce it

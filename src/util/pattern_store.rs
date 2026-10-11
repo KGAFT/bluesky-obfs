@@ -10,7 +10,7 @@ use crate::util::io_util::{PacketAnalyzeFuture, hardwire_proxy_to_endpoint};
 use wreq::{Client, Emulation, Proxy};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tfserver::structures::s_type;
+use the_fourth_utils::structures::s_type;
 use tls_parser::TlsRecordType;
 use tokio::fs;
 use tokio::sync::{Mutex, broadcast};

@@ -1,3 +1,4 @@
+use the_fourth_utils::rand;
 use crate::codec::fake_codec::{
     ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider,
 };
@@ -8,15 +9,15 @@ use crate::strategy::ConnectionPattern;
 use crate::util::crypt_util::{AES_GCM_OVERHEAD, aes256_gcm_decrypt, aes256_gcm_encrypt};
 use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, PacketContainer, ServerBeginStruct, ServerHelloStruct};
 use crate::util::replay_guard::{HELLO_NONCE_LEN, ReplayGuard};
-use crate::util::session_keys::{
+use the_fourth_utils::util::session_keys::{
     CONFIRM_LABEL_CLIENT, CONFIRM_LABEL_SERVER, constant_time_eq, derive_confirmation_tag,
 };
 use crate::util::rand_util::generate_random_u8_vec;
-use rand::{Rng, random_range};
+use the_fourth_utils::rand::{RngExt, random_range};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::mem;
 use std::sync::Arc;
-use tfserver::structures::s_type;
+use the_fourth_utils::structures::s_type;
 use tokio_util::bytes::Bytes;
 
 /// Upper bound on a login, enforced before it reaches a credential lookup.

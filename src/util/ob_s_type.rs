@@ -1,15 +1,16 @@
+use the_fourth_utils::rand;
 use crate::strategy::{ArchivedConnectionPattern, ConnectionPattern};
 use crate::util::ob_s_type::ObSType::{ClientBegin, ClientHello, PacketContainerB, PacketContainerE, ServerBegin, ServerHello};
 use crate::util::rand_util::generate_random_u8_vec;
 use num_enum::TryFromPrimitive;
-use rand::Rng;
-use rkyv::{Archive, Deserialize, Serialize};
+use the_fourth_utils::rand::RngExt;
+use the_fourth_utils::rkyv::{Archive, Deserialize, Serialize};
 use std::any::{Any, TypeId};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
-use tfserver::structures::s_type;
-use tfserver::structures::s_type::{StrongType, StructureType};
-use tfserver::{impl_strong_type, impl_structure_type};
+use the_fourth_utils::structures::s_type;
+use the_fourth_utils::structures::s_type::{StrongType, StructureType};
+use the_fourth_utils::{impl_strong_type, impl_structure_type};
 use tokio_util::bytes::Bytes;
 
 #[repr(u8)]
@@ -26,6 +27,7 @@ use tokio_util::bytes::Bytes;
     Archive,
     Default,
 )]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub enum ObSType {
     #[default]
     ClientHello,
@@ -63,6 +65,7 @@ pub const SERVER_VALIDATE_MSG: &str = "server hello message!";
 pub const CLIENT_BEGIN: &str = "client begin!";
 pub const SERVER_BEGIN: &str = "server begin!";
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct PacketContainer {
     pub padding: Vec<u8>,
     pub packet: Vec<u8>,
@@ -151,6 +154,7 @@ impl PacketContainer {
 
 
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct PacketContainerBytes {
     pub padding: Vec<u8>,
     pub packet: Bytes,
@@ -212,6 +216,7 @@ impl PacketContainerBytes {
 }
 
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct ClientHelloStruct {
     pub s_type: ObSType,
     pub validate_msg: String,
@@ -250,6 +255,7 @@ impl ClientHelloStruct {
 }
 
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct ServerHelloStruct {
     pub s_type: ObSType,
     pub validate_msg: String,
@@ -275,6 +281,7 @@ impl ServerHelloStruct {
     }
 }
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct ClientBeginStruct {
     pub s_type: ObSType,
     pub validate_msg: String,
@@ -307,6 +314,7 @@ impl ClientBeginStruct {
 }
 
 #[derive(Serialize, Deserialize, Debug, Archive)]
+#[rkyv(crate = the_fourth_utils::rkyv)]
 pub struct ServerBeginStruct {
     pub s_type: ObSType,
     pub validate_msg: String,
