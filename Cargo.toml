@@ -2,6 +2,14 @@
 name = "bluesky-obfs"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/KGAFT/bluesky-obfs/"
+categories = ["asynchronous", "network-programming", "web-programming"]
+keywords = ["tcp", "tokio", "traffic-obfuscation", "tokio-framed"]
+readme = "README.md"
+description = "A lightweight tcp server/client pair for network programming"
+documentation = "https://docs.rs/bluesky-obfs"
+
 
 [lib]
 path = "src/lib.rs"
