@@ -1,4 +1,4 @@
-use crate::strategy::ConnectionPattern;
+use crate::obfs_data::strategy::ConnectionPattern;
 #[derive(Clone)]
 pub struct FakeCodecRateLimiterCfg {
     pub bandwidth_max_derivation_percent: f64,
@@ -58,7 +58,6 @@ impl FakeCodecRateLimiter {
         }
     }
     pub fn check_if_valid(&self) -> bool {
-   
         let order_len = self.client_pattern.order_overall_len();
         let bandwidth_len = self.client_pattern.bandwidth_overall_len();
 

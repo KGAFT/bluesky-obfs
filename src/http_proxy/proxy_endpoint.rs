@@ -1,4 +1,5 @@
 use crate::codec::tls_codec::TlsCodec;
+use crate::dbg_log;
 use crate::util::io_util::{
     EndPointSideChannel, SenderSideChannel, handler_channel, receive_message, send_message,
 };
@@ -17,19 +18,41 @@ pub struct ProxyEndpoint {
 
 impl ProxyEndpoint {
     pub async fn new(destination: String) -> io::Result<(Self, SenderSideChannel)> {
-        dbg_log!("[FakeCodec DEBUG] starting connect to destination: {}", destination);
-        let connection = match timeout(Duration::from_secs(10), TcpStream::connect(destination.clone())).await {
+        dbg_log!(
+            "[FakeCodec DEBUG] starting connect to destination: {}",
+            destination
+        );
+        let connection = match timeout(
+            Duration::from_secs(10),
+            TcpStream::connect(destination.clone()),
+        )
+        .await
+        {
             Ok(res) => res,
             Err(_e) => {
-                dbg_log!("[FakeCodec DEBUG] Connection to {} timed out after {}", destination, _e);
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "Connection timed out"));
+                dbg_log!(
+                    "[FakeCodec DEBUG] Connection to {} timed out after {}",
+                    destination,
+                    _e
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Connection timed out",
+                ));
             }
         };
         if let Err(e) = connection {
-            dbg_log!("[FakeCodec DEBUG] Failed to connect to destination {}: {}", destination, e);
+            dbg_log!(
+                "[FakeCodec DEBUG] Failed to connect to destination {}: {}",
+                destination,
+                e
+            );
             return Err(e);
         }
-        dbg_log!("[FakeCodec DEBUG] connected to destination: {}", destination);
+        dbg_log!(
+            "[FakeCodec DEBUG] connected to destination: {}",
+            destination
+        );
         let connection = connection?;
         connection.set_nodelay(true)?;
         let channel = handler_channel();

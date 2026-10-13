@@ -1,23 +1,26 @@
-use the_fourth_utils::rand;
 use crate::codec::fake_codec::{
     ClientCredentialProvider, CredentialsSide, FakeCodecCfg, ServerCredentialProvider,
 };
-use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter};
+use crate::codec::fake_codec_limiter::FakeCodecRateLimiter;
 use crate::codec::spake2_injector::Spake2State::FirstPartNegotiated;
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN};
-use crate::strategy::ConnectionPattern;
-use crate::util::crypt_util::{AES_GCM_OVERHEAD, aes256_gcm_decrypt, aes256_gcm_encrypt};
-use crate::util::ob_s_type::{ClientBeginStruct, ClientHelloStruct, PacketContainer, ServerBeginStruct, ServerHelloStruct};
-use crate::util::replay_guard::{HELLO_NONCE_LEN, ReplayGuard};
-use the_fourth_utils::util::session_keys::{
-    CONFIRM_LABEL_CLIENT, CONFIRM_LABEL_SERVER, constant_time_eq, derive_confirmation_tag,
+use crate::dbg_log;
+use crate::obfs_data::ob_s_type::{
+    ClientBeginStruct, ClientHelloStruct, PacketContainer, ServerBeginStruct, ServerHelloStruct,
 };
+use crate::obfs_data::replay_guard::{HELLO_NONCE_LEN, ReplayGuard};
+use crate::obfs_data::strategy::ConnectionPattern;
+use crate::util::crypt_util::{AES_GCM_OVERHEAD, aes256_gcm_decrypt, aes256_gcm_encrypt};
 use crate::util::rand_util::generate_random_u8_vec;
-use the_fourth_utils::rand::{RngExt, random_range};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::mem;
 use std::sync::Arc;
+use the_fourth_utils::rand;
+use the_fourth_utils::rand::{RngExt, random_range};
 use the_fourth_utils::structures::s_type;
+use the_fourth_utils::util::session_keys::{
+    CONFIRM_LABEL_CLIENT, CONFIRM_LABEL_SERVER, constant_time_eq, derive_confirmation_tag,
+};
 use tokio_util::bytes::Bytes;
 
 /// Upper bound on a login, enforced before it reaches a credential lookup.
@@ -40,12 +43,6 @@ pub enum Spake2State {
     SecondPartNegotiated(Vec<u8>),
 }
 
-/// Everything both peers agreed on during the hello exchange, in a form both
-/// sides serialize identically.
-///
-/// The confirmation tags and the tunnel keys are both bound to this, so a peer
-/// that saw a different handshake — a replayed hello, a swapped login, a
-/// tampered auth element — cannot produce a matching tag.
 #[derive(Clone, Default)]
 pub struct HandshakeTranscript {
     pub client_auth: Vec<u8>,
@@ -85,13 +82,6 @@ pub struct Spake2Injector {
     rate_limiter: Option<FakeCodecRateLimiter>,
     base_tls_header: Option<Vec<u8>>,
     /// Set when the rate limiter rejected a record.
-    ///
-    /// `on_remote_packet` returns `None` for two unrelated reasons — "this
-    /// record was consumed, the handshake milestone is reached" and "this client
-    /// blew the rate limit, drop it". The handshake loop cannot tell them apart
-    /// from the `Option` alone and treated both as success, so a rate-limited
-    /// client that had already reached `SecondPartNegotiated` was promoted into
-    /// the tunnel instead of being dropped.
     rate_limited: bool,
     /// Accumulates as the hello exchange progresses; complete once both auth
     /// elements have been seen. Feeds the confirmation tags and the tunnel keys.
@@ -192,17 +182,23 @@ impl Spake2Injector {
 
     pub async fn probe_packet_after_handshake(&mut self, data: Bytes) -> bool {
         match &self.cfg.credentials {
-            CredentialsSide::Server(_) => self.probe_on_server_side_packet_after_handshake(data).await,
-            CredentialsSide::Client(_) => self.probe_on_client_side_packet_after_handshake(data).await,
+            CredentialsSide::Server(_) => {
+                self.probe_on_server_side_packet_after_handshake(data).await
+            }
+            CredentialsSide::Client(_) => {
+                self.probe_on_client_side_packet_after_handshake(data).await
+            }
         }
     }
 
     async fn probe_on_server_side_packet_after_handshake(&mut self, data: Bytes) -> bool {
-        self.probe_for_client_begin(&data.as_ref()[TLS_HEADER_LEN..]).await
+        self.probe_for_client_begin(&data.as_ref()[TLS_HEADER_LEN..])
+            .await
     }
 
-    async fn probe_on_client_side_packet_after_handshake(&mut self, data: Bytes) ->bool {
-        self.probe_for_server_begin(&data.as_ref()[TLS_HEADER_LEN..]).await
+    async fn probe_on_client_side_packet_after_handshake(&mut self, data: Bytes) -> bool {
+        self.probe_for_server_begin(&data.as_ref()[TLS_HEADER_LEN..])
+            .await
     }
 
     async fn server_packet_after_handshake(&mut self) -> Option<Bytes> {
@@ -212,13 +208,12 @@ impl Spake2Injector {
         Some(Bytes::from_owner(packet))
     }
 
-    async fn client_packet_after_handshake(&mut self)  -> Option<Bytes> {
+    async fn client_packet_after_handshake(&mut self) -> Option<Bytes> {
         let confirm = self.own_confirm_tag()?;
         let header = self.base_tls_header.as_ref()?.to_vec();
         let packet = Self::make_client_begin_msg(&self.cfg, header, &confirm).await?;
         Some(Bytes::from_owner(packet))
     }
-
 
     async fn on_server_side_local_packet(&mut self, data: Bytes) -> Option<Bytes> {
         let is_app = is_application_data(&data);
@@ -233,15 +228,14 @@ impl Spake2Injector {
                 Some(data)
             }
             Spake2State::FirstPartNegotiated(fp) => {
-
                 if is_app && self.tx_counter >= self.target_packet {
                     self.tx_counter += 1;
                     match fp {
                         FirstPartSpake2::Client(_) => None,
                         FirstPartSpake2::Server(hello) => {
-                            let res = Self::inject_server_message(&self.cfg, hello, data.to_vec())
-                                .await;
-                            if res.is_none(){
+                            let res =
+                                Self::inject_server_message(&self.cfg, hello, data.to_vec()).await;
+                            if res.is_none() {
                                 self.state = Spake2State::Begin;
                                 return Some(data);
                             }
@@ -272,7 +266,6 @@ impl Spake2Injector {
     async fn on_server_side_remote_packet(&mut self, data: Bytes) -> Option<Bytes> {
         let is_app = is_application_data(&data);
 
-
         match &self.state {
             Spake2State::Begin => {
                 if is_app {
@@ -281,9 +274,8 @@ impl Spake2Injector {
                         &self.cfg,
                         &data.as_ref()[TLS_HEADER_LEN..],
                     )
-                        .await
+                    .await
                     {
-
                         if let Some(guard) = self.cfg.replay_guard.as_ref() {
                             if !guard.accept(&hello.nonce, hello.current_time) {
                                 dbg_log!(
@@ -364,7 +356,6 @@ impl Spake2Injector {
         let is_app = is_application_data(&data);
         match &self.state {
             Spake2State::Begin => {
-
                 if is_app && self.tx_counter >= self.target_packet {
                     self.tx_counter += 1;
                     let res = Self::inject_client_message(&self.cfg, data.to_vec()).await?;
@@ -416,7 +407,7 @@ impl Spake2Injector {
                         &self.cfg,
                         &data.as_ref()[TLS_HEADER_LEN..],
                     )
-                        .await
+                    .await
                     {
                         let FirstPartSpake2::Client(spake) = spake else {
                             return None;
@@ -471,7 +462,6 @@ impl Spake2Injector {
                 return None;
             }
         };
-
 
         if creds.0.len() > MAX_LOGIN_LEN {
             dbg_log!(
@@ -545,7 +535,7 @@ impl Spake2Injector {
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(m) => m,
             None => {
@@ -581,7 +571,6 @@ impl Spake2Injector {
         client_hello: &ClientHelloStruct,
         original_packet: Vec<u8>,
     ) -> Option<(Vec<u8>, Spake2<Ed25519Group>, Vec<u8>)> {
-
         dbg_log!("[FakeCodec DEBUG] inject_server_message: Starting");
         let mut tls_header = (&original_packet[..TLS_HEADER_LEN]).to_vec();
 
@@ -611,8 +600,9 @@ impl Spake2Injector {
             cred_provider,
             cfg.server_id.as_slice(),
             client_hello.login.clone(),
-        client_hello.current_time)
-            .await
+            client_hello.current_time,
+        )
+        .await
         {
             Some(sa) => sa,
             None => {
@@ -658,7 +648,7 @@ impl Spake2Injector {
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(m) => m,
             None => {
@@ -719,7 +709,7 @@ impl Spake2Injector {
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(d) => d,
             None => {
@@ -742,7 +732,6 @@ impl Spake2Injector {
         base_tls_header.append(&mut data);
         Some(base_tls_header)
     }
-
 
     pub(crate) async fn make_server_begin_msg(
         cfg: &FakeCodecCfg,
@@ -775,7 +764,7 @@ impl Spake2Injector {
             data.as_slice(),
             cfg.public_password.as_slice(),
         )
-            .await
+        .await
         {
             Some(d) => d,
             None => {
@@ -799,7 +788,6 @@ impl Spake2Injector {
         base_tls_header.append(&mut data);
         Some(base_tls_header)
     }
-
 
     async fn probe_for_server_begin(&self, packet: &[u8]) -> bool {
         let Some(msg) =
@@ -825,7 +813,6 @@ impl Spake2Injector {
         dbg_log!("[FakeCodec DEBUG] probe_for_server_begin: confirmed");
         true
     }
-
 
     /// Recognise a `ClientBegin` **and** verify its key-confirmation tag.
     ///
@@ -947,9 +934,12 @@ impl Spake2Injector {
         cred_provider: Arc<dyn ServerCredentialProvider>,
         server_id: &[u8],
         client_id: String,
-        time_in_message: u64
+        time_in_message: u64,
     ) -> Option<(Vec<u8>, Spake2<Ed25519Group>)> {
-        let password = match cred_provider.get_client_password(&client_id, time_in_message).await {
+        let password = match cred_provider
+            .get_client_password(&client_id, time_in_message)
+            .await
+        {
             Some(p) => p,
             None => {
                 dbg_log!(

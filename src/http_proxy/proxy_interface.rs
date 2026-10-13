@@ -1,10 +1,13 @@
-use crate::util::io_util::{handler_channel, receive_message, send_message, EndPointSideChannel, SenderSideChannel};
 use crate::codec::tls_codec::TlsCodec;
+use crate::dbg_log;
+use crate::util::io_util::{
+    EndPointSideChannel, SenderSideChannel, handler_channel, receive_message, send_message,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 
@@ -27,8 +30,7 @@ impl ProxyInterface {
     /// and surface much later as an unexplained handshake failure. Now it is an
     /// ordinary error at the call site.
     pub async fn new(port: u16) -> std::io::Result<(Self, SenderSideChannel)> {
-        let listener =
-            TcpListener::bind("127.0.0.1:".to_string() + &port.to_string()).await?;
+        let listener = TcpListener::bind("127.0.0.1:".to_string() + &port.to_string()).await?;
         let channel = handler_channel();
         let stop_sig = broadcast::channel(1);
         let connection_dest = Arc::new(Mutex::new(None));
@@ -126,42 +128,42 @@ async fn handle_connect(
 
     loop {
         tokio::select! {
-        _ = stop_sig.recv() => return,
+            _ = stop_sig.recv() => return,
 
-        // Bytes coming from the local client -> forward to the data channel.
-        read = receive_message(&mut cli_stream)=> {
-                match read {
-                    Ok(res) => {
-                        match res {
-                            Some(data) => {
-                                if tx.send(data.freeze()).await.is_err(){
-                                    return
+            // Bytes coming from the local client -> forward to the data channel.
+            read = receive_message(&mut cli_stream)=> {
+                    match read {
+                        Ok(res) => {
+                            match res {
+                                Some(data) => {
+                                    if tx.send(data.freeze()).await.is_err(){
+                                        return
+                                    }
                                 }
+                                None => {}
                             }
-                            None => {}
                         }
-                    }
-                    Err(disconnect) => {
-                        if disconnect{
-                             dbg_log!("Client disconnected");
+                        Err(disconnect) => {
+                            if disconnect{
+                                 dbg_log!("Client disconnected");
+                                return;
+                            }
+                        }
+                    }}
+
+            // Bytes coming back from the data channel (the target's response) ->
+            // write to the local client.
+            data = rx.recv() => {
+                match data {
+                    Some(data) => {
+                        if send_message(&mut cli_stream, data).await.is_err() {
                             return;
                         }
                     }
-                }}
-
-        // Bytes coming back from the data channel (the target's response) ->
-        // write to the local client.
-        data = rx.recv() => {
-            match data {
-                Some(data) => {
-                    if send_message(&mut cli_stream, data).await.is_err() {
-                        return;
-                    }
+                    None => return,
                 }
-                None => return,
             }
         }
-    }
     }
 }
 
@@ -205,7 +207,6 @@ async fn proxy_setup(client: &mut TcpStream) -> Option<SetupResult> {
             initial_request: None,
         });
     }
-
 
     let dest = extract_http_dest(&path, &request)?;
 
@@ -251,8 +252,11 @@ async fn proxy_setup(client: &mut TcpStream) -> Option<SetupResult> {
     })
 }
 
-
-async fn read_chunked_body(client: &mut TcpStream, buf: &mut Vec<u8>, body_start: usize) -> Option<()> {
+async fn read_chunked_body(
+    client: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    body_start: usize,
+) -> Option<()> {
     let mut pos = body_start;
 
     loop {
@@ -300,7 +304,6 @@ async fn read_chunked_body(client: &mut TcpStream, buf: &mut Vec<u8>, body_start
     }
 }
 
-
 async fn read_more(client: &mut TcpStream, buf: &mut Vec<u8>) -> Option<bool> {
     let mut tmp = [0u8; 4096];
     let n = client.read(&mut tmp).await.ok()?;
@@ -310,7 +313,6 @@ async fn read_more(client: &mut TcpStream, buf: &mut Vec<u8>) -> Option<bool> {
     buf.extend_from_slice(&tmp[..n]);
     Some(true)
 }
-
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4)

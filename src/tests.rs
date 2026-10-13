@@ -2,30 +2,30 @@
 
 use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
 use crate::http_proxy::proxy_interface::ProxyInterface;
-use crate::tls_inspector::TlsRecordReassembler;
-use crate::util::io_util::{receive_message, send_message, PacketAnalyzeFuture, SenderSideChannel};
+use crate::util::io_util::{PacketAnalyzeFuture, SenderSideChannel, receive_message, send_message};
+use crate::util::tls_inspector::TlsRecordReassembler;
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodec, FakeCodecCfg, ServerCredentialProvider};
+use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
+use crate::obfs_data::delay_generator::DelayType;
+use crate::obfs_data::pattern_store::PatternStore;
+use crate::obfs_data::replay_guard::ReplayGuard;
 use the_fourth_utils::async_trait::async_trait;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 use wreq::IntoEmulation;
 use wreq_util::Emulation;
-use crate::codec::fake_codec::{ClientCredentialProvider, CredentialsSide, FakeCodec, FakeCodecCfg, ServerCredentialProvider};
-use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
-use crate::util::delay_generator::DelayType;
-use crate::util::replay_guard::ReplayGuard;
-use crate::util::pattern_store::PatternStore;
 
-// Only the network tests below use these.
-#[cfg(test)]
-use crate::tls_inspector::TlsDirection;
 #[cfg(test)]
 use crate::util::io_util::hardwire_proxy_to_endpoint;
+// Only the network tests below use these.
+#[cfg(test)]
+use crate::util::tls_inspector::TlsDirection;
 #[cfg(test)]
 use tokio::fs::File;
 #[cfg(test)]
@@ -37,8 +37,8 @@ use wreq::{Client, Proxy};
 
 #[tokio::test]
 async fn test_proxy() {
-    let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
-    let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
+    let proxy = ProxyInterface::new(9945).await.expect("bind local proxy");
+    let endpoint = ProxyEndpoint::new("www.example.com:443".to_string())
         .await
         .expect("Failed to create proxy endpoint");
     let stop_sig = broadcast::channel(1);
@@ -49,13 +49,12 @@ async fn test_proxy() {
 
     let client = Client::builder()
         .emulation(Emulation::Firefox151)
-        .proxy(Proxy::https("http://127.0.0.1:9999/").unwrap())
+        .proxy(Proxy::https("http://127.0.0.1:9945/").unwrap())
         .build()
         .expect("client");
 
-    // let resp = client.get("https://tls.peet.ws/api/all").send().await.expect("response");
     let resp = client
-        .get("https://www.google.com/")
+        .get("https://www.example.com/")
         .send()
         .await
         .expect("response");
@@ -69,7 +68,7 @@ async fn test_proxy() {
 #[tokio::test]
 async fn test_tls_inspector() {
     let proxy = ProxyInterface::new(9999).await.expect("bind local proxy");
-    let endpoint = ProxyEndpoint::new("www.google.com:443".to_string())
+    let endpoint = ProxyEndpoint::new("www.example.com:443".to_string())
         .await
         .expect("Failed to create proxy endpoint");
     let stop_sig = broadcast::channel(1);
@@ -96,7 +95,7 @@ async fn test_tls_inspector() {
 
     // let resp = client.get("https://tls.peet.ws/api/all").send().await.expect("response");
     let resp = client
-        .get("https://www.google.com/")
+        .get("https://www.example.com/")
         .send()
         .await
         .expect("response");
@@ -113,7 +112,7 @@ async fn test_tls_inspector() {
 async fn test_tls_pattern() {
     let pattern_store = PatternStore::new("cli_pattern.bin", "serv_pattern.bin");
     let emulation = Emulation::Firefox151.into_emulation();
-    let pattern = pattern_store.load_or_capture(emulation, "www.pinterest.com:443".to_string(), "https://www.pinterest.com/".to_string()).await;
+    let pattern = pattern_store.load_or_capture(emulation, "www.example.com:443".to_string(), "https://www.example.com/".to_string()).await;
 
     println!("Packets from client");
 
@@ -160,7 +159,7 @@ impl ClientCredentialProvider for TestClientCredProvider{
 pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
     let pattern_store = PatternStore::new("cli_pattern.bin", "serv_pattern.bin");
     let emulation = Emulation::Firefox151.into_emulation();
-    let pattern = pattern_store.load_or_capture(emulation.clone(), "www.pinterest.com:443".to_string(), "https://www.pinterest.com/".to_string()).await;
+    let pattern = pattern_store.load_or_capture(emulation.clone(), "www.example.com:443".to_string(), "https://www.example.com/".to_string()).await;
 
 
     let mut rate_limiter_cfg = FakeCodecRateLimiterCfg::default();
@@ -170,8 +169,8 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         pattern: pattern.server,
         public_password: pbk_key,
         credentials: CredentialsSide::Server(Arc::new(TestServerCredProvider{})),
-        target_sni: "https://www.pinterest.com/".to_string(),
-        target_sni_connection_dest: "www.pinterest.com:443".to_string() ,
+        target_sni: "https://www.example.com/".to_string(),
+        target_sni_connection_dest: "www.example.com:443".to_string() ,
         setup_proxy_port: 7756,
         target_browser: emulation,
         message_padding_size: 12..50,
@@ -184,7 +183,7 @@ pub async fn test_fake_tls_codec_server(pbk_key: Vec<u8>){
         replay_guard: Some(Arc::new(ReplayGuard::new(60_000))),
     };
 
-    let listener = TcpListener::bind("64.111.93.111:443").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
 
         let mut cli = listener.accept().await.unwrap();
     cli.0.set_nodelay(true).unwrap();
@@ -230,7 +229,7 @@ async fn receive_msg_from_endpoint(end_point: &mut Option<(ProxyEndpoint, Sender
 pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
     let pattern_store = PatternStore::new("cli_pattern.bin", "serv_pattern.bin");
     let emulation = Emulation::Firefox151.into_emulation();
-    let pattern = pattern_store.load_or_capture(emulation, "www.pinterest.com:443".to_string(), "https://www.pinterest.com/".to_string()).await;
+    let pattern = pattern_store.load_or_capture(emulation, "www.example.com:443".to_string(), "https://www.example.com/".to_string()).await;
 
 
 
@@ -238,8 +237,8 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
         pattern: pattern.client,
         public_password: pbk_key,
         credentials: CredentialsSide::Client(Arc::new(TestClientCredProvider{})),
-        target_sni: "https://www.pinterest.com/".to_string(),
-        target_sni_connection_dest: "www.pinterest.com:443".to_string() ,
+        target_sni: "https://www.example.com/".to_string(),
+        target_sni_connection_dest: "www.example.com:443".to_string() ,
         setup_proxy_port: 7756,
         target_browser: Emulation::Firefox151.into_emulation(),
         message_padding_size: 12..50,
@@ -253,7 +252,7 @@ pub async fn test_fake_tls_codec_client(pbk_key: Vec<u8>){
     };
 
     let mut cli_codec = FakeCodec::new(cfg_client);
-    let mut client = TcpStream::connect("64.111.93.111:443").await.unwrap();
+    let mut client = TcpStream::connect("0.0.0.0:443").await.unwrap();
     client.set_nodelay(true).unwrap();
     if cli_codec.setup_stream(&mut client).await{
         let mut client = Framed::new(client, cli_codec);
@@ -312,13 +311,13 @@ pub fn test_server_record_inspect(
 #[cfg(test)]
 mod unit {
     use crate::codec::fake_codec_limiter::{FakeCodecRateLimiter, FakeCodecRateLimiterCfg};
-    use crate::strategy::{ConnectionPattern, UsedPacketSize};
-    use crate::tls_inspector::{TlsDirection, TlsInspectorState, TlsRecordReassembler};
+    use crate::obfs_data::delay_generator::{DelayGenerator, DelayType};
+    use crate::obfs_data::pattern_store::{PatternPair, PatternStore};
+    use crate::obfs_data::replay_guard::{HELLO_NONCE_LEN, ReplayGuard};
+    use crate::obfs_data::strategy::{ConnectionPattern, UsedPacketSize};
     use crate::util::crypt_util::{AES_GCM_OVERHEAD, aes256_gcm_decrypt, aes256_gcm_encrypt};
-    use crate::util::delay_generator::{DelayGenerator, DelayType};
-    use crate::util::pattern_store::{PatternPair, PatternStore};
     use crate::util::rand_util::generate_random_u8_vec;
-    use crate::util::replay_guard::{HELLO_NONCE_LEN, ReplayGuard};
+    use crate::util::tls_inspector::{TlsDirection, TlsInspectorState, TlsRecordReassembler};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use the_fourth_utils::util::session_keys::{

@@ -1,14 +1,16 @@
-use the_fourth_utils::rand;
 use crate::codec::spake2_injector::{Spake2Injector, Spake2State, is_application_data};
 use crate::codec::tls_codec::{TLS_HEADER_LEN, TLS_MAX_RECORD_LEN, TlsCodec};
+use crate::dbg_log;
 use crate::http_proxy::proxy_endpoint::ProxyEndpoint;
 use crate::http_proxy::proxy_interface::ProxyInterface;
-use crate::strategy::ConnectionPattern;
+use crate::obfs_data::replay_guard::ReplayGuard;
+use crate::obfs_data::strategy::ConnectionPattern;
 use crate::util::io_util::{SenderSideChannel, receive_message, send_message};
-use crate::util::replay_guard::ReplayGuard;
+use the_fourth_utils::rand;
 use the_fourth_utils::util::session_keys::SessionKeys;
 
 use crate::codec::fake_codec_limiter::FakeCodecRateLimiterCfg;
+use crate::obfs_data::delay_generator::{DelayGenerator, DelayType};
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -20,7 +22,6 @@ use the_fourth_utils::structures::transport::{AsyncReadWrite, Transport};
 use tokio_util::bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use wreq::{Client, Emulation, Proxy};
-use crate::util::delay_generator::{DelayGenerator, DelayType};
 
 #[derive(Clone)]
 pub struct FakeCodecCfg {
@@ -51,7 +52,11 @@ pub enum CredentialsSide {
 pub trait ServerCredentialProvider: Send + Sync + 'static {
     ///Store the time of last successfull auth in somewhere else database and so on, if the time is skewed,
     /// or equal or less the last db record it's obvious replay, return None
-    async fn get_client_password(&self, client_identity: &str, time_in_auth_ms: u64) -> Option<Vec<u8>>;
+    async fn get_client_password(
+        &self,
+        client_identity: &str,
+        time_in_auth_ms: u64,
+    ) -> Option<Vec<u8>>;
 }
 
 #[async_trait]
@@ -104,7 +109,10 @@ impl Decoder for FakeCodec {
             return Err(io::Error::new(io::ErrorKind::Other, "decryption failed"));
         };
         if keys.open_in_place(&mut frame).is_none() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "decryption failed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decryption failed",
+            ));
         }
 
         if frame.len() < 2 {
@@ -112,7 +120,10 @@ impl Decoder for FakeCodec {
         }
         let padding_len = frame.get_u16() as usize;
         if frame.len() < padding_len {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad padding len"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad padding len",
+            ));
         }
         frame.advance(padding_len);
 
@@ -232,14 +243,15 @@ impl FakeCodec {
             leftover: BytesMut::new(),
         }
     }
-    ///If setup_stream failed multiple times, you've probably want to temporarily blacklist this client
+    ///If setup_stream failed multiple times, you are probably want to temporarily blacklist this client
     pub async fn setup_stream<T: AsyncReadWrite + Send + Sync>(&mut self, stream: &mut T) -> bool {
         dbg_log!("[FakeCodec DEBUG] setup_stream: Starting setup");
         let deadline = self.cfg.handshake_timeout;
         let (shared, is_server) = match self.cfg.credentials {
             CredentialsSide::Server(_) => {
                 dbg_log!("[FakeCodec DEBUG] setup_stream: Acting as Server");
-                DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
+                DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice())
+                    .await;
                 let res = tokio::time::timeout(deadline, self.handshake_from_server(stream)).await;
                 match res {
                     Ok(v) => (v, true),
@@ -262,8 +274,11 @@ impl FakeCodec {
             }
         };
         if let Some((shared, base_tls_header, transcript)) = shared {
-            let session_keys =
-                SessionKeys::derive_session_keys(shared.as_slice(), transcript.as_slice(), is_server);
+            let session_keys = SessionKeys::derive_session_keys(
+                shared.as_slice(),
+                transcript.as_slice(),
+                is_server,
+            );
             if let Some(keys) = session_keys {
                 dbg_log!("[FakeCodec DEBUG] setup_stream: Session keys derived successfully");
                 self.session_keys = Some(keys);
@@ -290,7 +305,8 @@ impl FakeCodec {
             Err(_e) => {
                 dbg_log!(
                     "[FakeCodec DEBUG] handshake_from_client: failed to bind local setup proxy on port {}: {}",
-                    self.cfg.setup_proxy_port, _e
+                    self.cfg.setup_proxy_port,
+                    _e
                 );
                 return None;
             }
@@ -301,10 +317,11 @@ impl FakeCodec {
 
         let req_fut = async {
             let res = client
-            .get(self.cfg.target_sni.clone())
-            .timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(30))
-            .send().await;
+                .get(self.cfg.target_sni.clone())
+                .timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(30))
+                .send()
+                .await;
             if let Ok(res) = res {
                 let data = res.bytes().await;
                 if let Ok(_data) = data {
@@ -388,7 +405,7 @@ impl FakeCodec {
             _ => None,
         }?;
 
-        if let Some(packet) = injector.packet_after_handshake().await{
+        if let Some(packet) = injector.packet_after_handshake().await {
             DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
@@ -396,7 +413,7 @@ impl FakeCodec {
         }
 
         let mut attempts = 0;
-        loop{
+        loop {
             if let Ok(msg) = receive_message(&mut temp_transport).await {
                 if let Some(msg) = msg {
                     if injector.probe_packet_after_handshake(msg.freeze()).await {
@@ -410,13 +427,12 @@ impl FakeCodec {
             attempts += 1;
         }
 
-        if let Some(packet) = injector.packet_after_handshake().await{
+        if let Some(packet) = injector.packet_after_handshake().await {
             DelayGenerator::pick_and_perform_delay_async(self.cfg.allowed_delays.as_slice()).await;
             send_message(&mut temp_transport, packet).await.ok()?;
         } else {
             return None;
         }
-
 
         self.leftover = std::mem::take(temp_transport.read_buffer_mut());
         dbg_log!(
@@ -493,7 +509,6 @@ impl FakeCodec {
             }
         }
 
-
         // A limiter drop must not be promoted into the tunnel just because the
         // SPAKE2 exchange happened to complete before the limit was hit.
         if injector.is_rate_limited() {
@@ -513,7 +528,7 @@ impl FakeCodec {
             return None;
         }
         let mut attempts = 0;
-        loop{
+        loop {
             if let Ok(msg) = receive_message(&mut temp_transport).await {
                 if let Some(msg) = msg {
                     if injector.probe_packet_after_handshake(msg.freeze()).await {

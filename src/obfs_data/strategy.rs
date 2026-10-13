@@ -1,10 +1,10 @@
-use the_fourth_utils::rand;
+use crate::obfs_data::ob_s_type::ObSType;
 use std::collections::HashMap;
 use std::ops::Range;
+use the_fourth_utils::rand;
 use the_fourth_utils::rand::RngExt;
 use the_fourth_utils::rkyv::{Archive, Deserialize, Serialize};
 use the_fourth_utils::structures::s_type::{StrongType, StructureType};
-use crate::util::ob_s_type::ObSType;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Archive)]
 #[rkyv(crate = the_fourth_utils::rkyv)]

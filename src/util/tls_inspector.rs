@@ -206,15 +206,7 @@ impl TlsRecordReassembler {
         }
     }
 
-    /// Check whether a record begins with a ClientHello handshake.
-    ///
-    /// TLS Handshake:
-    ///
-    ///     1 byte  handshake type
-    ///     3 bytes handshake length
-    ///     N bytes handshake body
-    ///
-    /// ClientHello = 0x01
+
     fn is_client_hello(
         header: &TlsRecordHeader,
         payload: &[u8],

@@ -1,18 +1,18 @@
-use the_fourth_utils::rand;
-use crate::strategy::{ArchivedConnectionPattern, ConnectionPattern};
-use crate::util::ob_s_type::ObSType::{ClientBegin, ClientHello, PacketContainerB, PacketContainerE, ServerBegin, ServerHello};
+use crate::obfs_data::ob_s_type::ObSType::{ClientBegin, ClientHello, PacketContainerB, PacketContainerE, ServerBegin, ServerHello};
+use crate::obfs_data::strategy::{ArchivedConnectionPattern, ConnectionPattern};
 use crate::util::rand_util::generate_random_u8_vec;
+use crate::dbg_log;
 use num_enum::TryFromPrimitive;
-use the_fourth_utils::rand::RngExt;
-use the_fourth_utils::rkyv::{Archive, Deserialize, Serialize};
 use std::any::{Any, TypeId};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use the_fourth_utils::rand;
+use the_fourth_utils::rand::RngExt;
+use the_fourth_utils::rkyv::{Archive, Deserialize, Serialize};
 use the_fourth_utils::structures::s_type;
 use the_fourth_utils::structures::s_type::{StrongType, StructureType};
 use the_fourth_utils::{impl_strong_type, impl_structure_type};
 use tokio_util::bytes::Bytes;
-
 #[repr(u8)]
 #[derive(
     Serialize,
@@ -228,7 +228,7 @@ pub struct ClientHelloStruct {
     pub current_time: u64,
     /// Single-use random value. Together with `current_time` this makes each
     /// hello usable exactly once inside the server's replay window; see
-    /// [`crate::util::replay_guard::ReplayGuard`].
+    /// [`crate::obfs_data::replay_guard::ReplayGuard`].
     pub nonce: Vec<u8>,
 }
 

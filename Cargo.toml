@@ -3,14 +3,6 @@ name = "bluesky-obfs"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-path = "src/server_main.rs"
-name = "server"
-
-[[bin]]
-path = "src/client_main.rs"
-name = "client"
-
 [lib]
 path = "src/lib.rs"
 name = "bsobfs"
